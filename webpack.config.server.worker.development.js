@@ -32,7 +32,6 @@ module.exports = {
     mode: 'development',
     devtool: 'eval-source-map',
     target: 'node',
-    watch: true,
     context: path.resolve(__dirname, './src/server'),
     entry: path.resolve(__dirname, './src/server/services/task-manager/Pool.worker.js'),
     output: {

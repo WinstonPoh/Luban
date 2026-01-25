@@ -51,6 +51,14 @@ module.exports = {
             'node_modules',
         ],
         extensions: ['.js', '.json', '.jsx', '.styl', '.ts', '.tsx'],
+        fallback: {
+            'path': require.resolve('path-browserify'),
+            'timers': require.resolve('timers-browserify'),
+            'stream': require.resolve('stream-browserify'),
+            'fs': false,
+            'net': false,
+            'tls': false,
+        },
     },
     entry: {
         app: path.resolve(__dirname, 'src/app/index.jsx'),
@@ -59,7 +67,7 @@ module.exports = {
     },
     output: {
         path: path.resolve(__dirname, 'output/src/app'),
-        filename: '[name].[hash].bundle.js',
+        filename: '[name].[contenthash].bundle.js',
         publicPath: '',
         globalObject: 'this',
         libraryTarget: 'umd',
@@ -68,9 +76,8 @@ module.exports = {
         minimize: false,
         splitChunks: {
             chunks: 'all',
-            name: true,
             cacheGroups: {
-                vendors: {
+                defaultVendors: {
                     test: /[\\/]node_modules[\\/]/,
                     priority: -10
                 }
@@ -215,24 +222,19 @@ module.exports = {
             // image files
             {
                 test: /\.(png|jpg|svg)$/,
-                loader: 'url-loader',
-                options: {
-                    limit: 8192
+                type: 'asset',
+                parser: {
+                    dataUrlCondition: {
+                        maxSize: 8192
+                    }
                 }
             },
             // font files
             {
                 test: /\.(ttf|woff|woff2|eot)(\?v=[0-9]\.[0-9]\.[0-9])?$/,
-                loader: 'file-loader'
+                type: 'asset/resource'
             },
         ]
-    },
-    // Some libraries import Node modules but don't use them in the browser.
-    // Tell Webpack to provide empty mocks for them so importing them works.
-    node: {
-        fs: 'empty',
-        net: 'empty',
-        tls: 'empty',
     },
     devServer: devServer,
 };

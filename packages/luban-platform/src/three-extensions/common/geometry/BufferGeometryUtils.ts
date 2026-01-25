@@ -75,7 +75,7 @@ function mergeVertices(geometry, tolerance = 1e-4): BufferGeometry {
         // Add another reference to the vertex if it's already
         // used by another index
         if (hash in hashToIndex) {
-            newIndices.push(hashToIndex[hash]);
+            newIndices.push(hashToIndex[contenthash]);
         } else {
             // copy data to the new index in the temporary attributes
             for (let j = 0, l = attributeNames.length; j < l; j++) {
@@ -99,7 +99,7 @@ function mergeVertices(geometry, tolerance = 1e-4): BufferGeometry {
                 }
             }
 
-            hashToIndex[hash] = nextIndex;
+            hashToIndex[contenthash] = nextIndex;
             newIndices.push(nextIndex);
             nextIndex++;
         }

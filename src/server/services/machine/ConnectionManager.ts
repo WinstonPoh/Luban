@@ -35,6 +35,10 @@ import Channel, {
     NetworkServiceChannelInterface,
     SystemChannelInterface
 } from './channels/Channel';
+
+// Union type for all possible channel implementations
+// Using 'any' to allow all channel types to be assigned
+type FullChannel = Channel & Record<string, any>;
 import { ChannelEvent } from './channels/ChannelEvent';
 import { sacpSerialChannel } from './channels/SacpSerialChannel';
 import { sacpTcpChannel } from './channels/SacpTcpChannel';
@@ -110,7 +114,7 @@ class ConnectionManager {
     private protocol: NetworkProtocol | SerialPortProtocol = NetworkProtocol.Unknown;
 
     // channel used to communicate with machine
-    private channel: Channel = null;
+    private channel: FullChannel = null;
 
     // connected machine instance to handle life cycle
     private machineInstance: MachineInstance = null;

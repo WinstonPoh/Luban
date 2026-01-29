@@ -10,7 +10,7 @@ import {
 import { EventEmitter } from 'events';
 
 import SocketServer from '../../../lib/SocketManager';
-import { MotorPowerMode } from '../sacp/SacpClient';
+import { MotorPowerMode } from '../../../../app/constants';
 
 interface ConnectionOpenOptions {
     address?: string;
@@ -61,7 +61,7 @@ export default class Channel extends EventEmitter {
     }
 
     public async stopHeartbeat(id?: string): Promise<void> {
-        return Promise.resolve(id);
+        return Promise.resolve();
     }
 
     /**

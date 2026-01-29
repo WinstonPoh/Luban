@@ -54,7 +54,8 @@ import {
     SINGLE_EXTRUDER_TOOLHEAD_FOR_SM2,
 } from '../../../constants';
 import logger from '../../../lib/logger';
-import SacpClient, { CoordinateType, MotorPowerMode } from '../sacp/SacpClient';
+import { MotorPowerMode } from '../../../../app/constants';
+import SacpClient, { CoordinateType } from '../sacp/SacpClient';
 import { MarlinStateData } from '../types';
 import Channel, {
     AirPurifierChannelInterface,
@@ -250,24 +251,6 @@ class SacpChannelBase extends Channel implements
             result: 0,
             text: 'ok',
         };
-    }
-
-    /**
-     * Get 3DP print module info.
-     *
-     * TODO: standardize use of extruder in APIs
-     */
-    private getPrintToolHeadModule(): ModuleInfo | null {
-        for (const key of Object.keys(this.moduleInfos)) {
-            const module = this.moduleInfos[key];
-            if (module && module instanceof ModuleInfo) {
-                if (includes(PRINTING_HEAD_MODULE_IDS, module.moduleId)) {
-                    return module;
-                }
-            }
-        }
-
-        return null;
     }
 
     /**
@@ -711,9 +694,11 @@ class SacpChannelBase extends Channel implements
 
     public async setFilterWorkSpeed(options) {
         const moduleInfo = this.moduleInfos && this.moduleInfos[AIR_PURIFIER];
-        this.sacpClient.setPurifierSpeed(moduleInfo.key, options.value).then(({ response }) => {
-            log.info(`Update Purifier speed, ${response.result}, ${options.value}`);
-        });
+        if (moduleInfo && !Array.isArray(moduleInfo)) {
+            this.sacpClient.setPurifierSpeed(moduleInfo.key, options.value).then(({ response }) => {
+                log.info(`Update Purifier speed, ${response.result}, ${options.value}`);
+            });
+        }
     }
 
     // interface: PrintJobChannelInterface
@@ -1464,7 +1449,7 @@ class SacpChannelBase extends Channel implements
             || this.moduleInfos[HEADT_BED_FOR_SM2]
             || this.moduleInfos[SNAPMAKER_J1_HEATED_BED]
         ); //
-        if (!heatBedModule) {
+        if (!heatBedModule || Array.isArray(heatBedModule)) {
             log.error('Can not find heated bed module. Command ignored.');
             return;
         }
@@ -1480,7 +1465,7 @@ class SacpChannelBase extends Channel implements
                 || this.moduleInfos[DUAL_EXTRUDER_TOOLHEAD_FOR_ARTISAN]
                  || this.moduleInfos[SINGLE_EXTRUDER_TOOLHEAD_FOR_SM2]);
         // || this.moduleInfos[HEADT_BED_FOR_SM2]); //
-        if (!toolHead) {
+        if (!toolHead || Array.isArray(toolHead)) {
             log.error(`non-eixst toolHead 3dp, moduleInfos:${this.moduleInfos}`,);
             return;
         }
@@ -1506,7 +1491,7 @@ class SacpChannelBase extends Channel implements
 
     public async updateWorkSpeed(toolhead, workSpeed, extruderIndex = 0) {
         const headModule = this.moduleInfos && (this.moduleInfos[toolhead]); //
-        if (!headModule) {
+        if (!headModule || Array.isArray(headModule)) {
             log.error(`non-eixst toolhead[${toolhead}], moduleInfos:${JSON.stringify(this.moduleInfos)}`,);
             return;
         }
@@ -1568,7 +1553,7 @@ class SacpChannelBase extends Channel implements
     public async laserSetWorkHeight(options) {
         const { toolHead, materialThickness, isRotate } = options;
         const headModule = this.moduleInfos && (this.moduleInfos[toolHead]); //
-        if (!headModule) {
+        if (!headModule || Array.isArray(headModule)) {
             log.error(`non-eixst toolhead[${toolHead}], moduleInfos:${JSON.stringify(this.moduleInfos)}`,);
             return;
         }

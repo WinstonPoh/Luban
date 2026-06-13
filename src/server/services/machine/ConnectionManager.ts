@@ -15,7 +15,6 @@ import {
 } from '../../../app/machines';
 import DataStorage from '../../DataStorage';
 import {
-    HEAD_CNC,
     HEAD_LASER,
     HEAD_PRINTING,
     LEVEL_ONE_POWER_LASER_FOR_SM2,
@@ -1295,18 +1294,25 @@ M3`;
             this.channel.goHome(headType);
             socket && socket.emit('move:status', { isHoming: true });
         } else {
-            await this.executeGcode(socket, { gcode: 'G53' });
-            await this.executeGcode(socket, { gcode: 'G28' });
-
-            callback && callback();
-
-            // ?
+            // Emit homing-start BEFORE G28 so the UI shows the modal during homing, then homing-finish
+            // AFTER it completes. Previously isHoming:true was emitted after G28 and isHoming:false was
+            // never emitted on HTTP, so the modal stuck and homing looked stalled (audit R5 / 02-F5).
             if (this.connectionType === ConnectionType.WiFi) {
                 socket && socket.emit('move:status', { isHoming: true });
             }
-            if (headType === HEAD_LASER || headType === HEAD_CNC) {
-                await this.executeGcode(socket, { gcode: 'G54' });
+            await this.executeGcode(socket, { gcode: 'G53' });
+            await this.executeGcode(socket, { gcode: 'G28' });
+
+            // Always restore the work coordinate system after homing — not just for laser/CNC. Leaving
+            // the machine in modal G53 (machine space) makes the next absolute move plunge to machine
+            // Z0 (audit R7 / 02-F3). A printing head re-selecting G54 is harmless.
+            await this.executeGcode(socket, { gcode: 'G54' });
+
+            if (this.connectionType === ConnectionType.WiFi) {
+                socket && socket.emit('move:status', { isHoming: false });
             }
+
+            callback && callback();
         }
     };
 

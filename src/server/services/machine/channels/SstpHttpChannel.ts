@@ -427,15 +427,20 @@ class SstpHttpChannel extends Channel implements
             const results = [];
             let failed = false;
             for (const code of splice.gcodes) {
+                // Skip blank lines. A multi-line gcode string can contain empty segments (e.g. a
+                // leading/trailing newline), and POSTing an empty `code` makes the machine error.
+                if (!code || !code.trim()) {
+                    continue;
+                }
                 const { ok, text } = await this._executeGcode(code) as GcodeResult;
                 if (text) {
                     results.push(text);
                 }
+                // Track failure so the caller (e.g. startGcode's job-prep abort, audit 04-F9) can
+                // react — but do NOT break: every line of a normal multi-line command (e.g. a
+                // jog's G91/G0/G90) must still be sent, or the move itself gets skipped.
                 if (ok === false) {
-                    // Stop at the first failed line so later lines of a modal-critical sequence
-                    // (e.g. G53/G0 Z/G54) don't run after a failure (audit 04-F9).
                     failed = true;
-                    break;
                 }
             }
 

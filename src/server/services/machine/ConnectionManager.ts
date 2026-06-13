@@ -52,6 +52,7 @@ import { ConnectionType } from './types';
 import SacpChannelBase from './channels/SacpChannel';
 import { L2WLaserToolModule } from '../../../app/machines/snapmaker-2-toolheads';
 import { octo } from './adaptor/Octo';
+import { buildSetWorkOriginGcode } from './setWorkOriginGcode';
 
 // Union type for all possible channel implementations
 // Using 'any' to allow all channel types to be assigned
@@ -1335,13 +1336,12 @@ M3`;
     public setWorkOrigin = async (socket, options, callback) => {
         const { xPosition, yPosition, zPosition, bPosition } = options;
         if (includes([NetworkProtocol.SacpOverTCP, SerialPortProtocol.SacpOverSerialPort], this.protocol)) {
+            // TODO(R13/SACP): SacpChannel.setWorkOrigin drops zero-valued axes the same way
+            // (truthiness gating). Apply the Number.isFinite fix there when the SACP path is tackled.
             this.channel.setWorkOrigin({ xPosition, yPosition, zPosition, bPosition });
         } else {
-            let gcode = 'G92 ';
-            xPosition && (gcode += `X${xPosition || 0} `);
-            yPosition && (gcode += `Y${yPosition || 0}  `);
-            zPosition && (gcode += `Z${zPosition || 0} `);
-            bPosition && (gcode += `B${bPosition || 0} `);
+            // Include axes set to exactly 0 (audit R13 / 02-F11); truthiness gating dropped them.
+            const gcode = buildSetWorkOriginGcode({ x: xPosition, y: yPosition, z: zPosition, b: bPosition });
             await this.executeGcode(socket, { gcode });
             callback && callback();
         }

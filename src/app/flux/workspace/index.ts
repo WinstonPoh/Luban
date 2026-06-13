@@ -482,7 +482,12 @@ export const actions = {
 
                 compareAndSet(data, currentState, 'isEnclosureDoorOpen', isEnclosureDoorOpen);
                 compareAndSet(data, currentState, 'zAxisModule', zAxisModule);
-                compareAndSet(data, currentState, 'headStatus', !!headStatus);
+                // Only update when the channel actually reports laser state. Coercing `!!headStatus`
+                // unconditionally forced the toggle off every poll on channels that omit the field
+                // (HTTP has no headStatus; it now sends a derived boolean) (audit R9 / 01-F2).
+                if (!isNil(headStatus)) {
+                    compareAndSet(data, currentState, 'headStatus', headStatus);
+                }
                 compareAndSet(data, currentState, 'laserCamera', laserCamera);
 
                 if (!isNil(airPurifier)) {

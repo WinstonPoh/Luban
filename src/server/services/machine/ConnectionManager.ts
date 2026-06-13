@@ -36,9 +36,6 @@ import Channel, {
     SystemChannelInterface
 } from './channels/Channel';
 
-// Union type for all possible channel implementations
-// Using 'any' to allow all channel types to be assigned
-type FullChannel = Channel & Record<string, any>;
 import { ChannelEvent } from './channels/ChannelEvent';
 import { sacpSerialChannel } from './channels/SacpSerialChannel';
 import { sacpTcpChannel } from './channels/SacpTcpChannel';
@@ -56,6 +53,10 @@ import { ConnectionType } from './types';
 import SacpChannelBase from './channels/SacpChannel';
 import { L2WLaserToolModule } from '../../../app/machines/snapmaker-2-toolheads';
 import { octo } from './adaptor/Octo';
+
+// Union type for all possible channel implementations
+// Using 'any' to allow all channel types to be assigned
+type FullChannel = Channel & Record<string, any>;
 
 const log = logger('lib:ConnectionManager');
 

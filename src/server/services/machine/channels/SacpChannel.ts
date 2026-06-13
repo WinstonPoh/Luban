@@ -30,6 +30,7 @@ import {
     HEAD_PRINTING,
     HEADT_BED_FOR_SM2,
     LOAD_FIMAMENT,
+    MotorPowerMode,
     UNLOAD_FILAMENT,
     WORKFLOW_STATUS_MAP
 } from '../../../../app/constants';
@@ -54,7 +55,6 @@ import {
     SINGLE_EXTRUDER_TOOLHEAD_FOR_SM2,
 } from '../../../constants';
 import logger from '../../../lib/logger';
-import { MotorPowerMode } from '../../../../app/constants';
 import SacpClient, { CoordinateType } from '../sacp/SacpClient';
 import { MarlinStateData } from '../types';
 import Channel, {

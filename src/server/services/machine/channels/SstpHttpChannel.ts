@@ -144,9 +144,11 @@ class SstpHttpChannel extends Channel implements
             .forEach(intervalRef => clearInterval(intervalRef));
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     public onConnection = () => {
-        this.stopHeartBeat();
+        // Intentionally a no-op: this fires for EVERY new client socket (2nd window, socket.io
+        // reconnect). Previously it called stopHeartBeat(), which killed the status poller of an
+        // already-connected machine and froze the UI (audit R4 / 01-F12). The poller lifecycle is
+        // owned by startHeartbeat()/connectionClose(); startHeartbeat() already cycles the worker.
     };
 
     public onDisconnection = () => {

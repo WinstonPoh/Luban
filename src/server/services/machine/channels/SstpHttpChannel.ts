@@ -99,6 +99,7 @@ export type StateOptions = {
 };
 
 export type GcodeResult = {
+    ok?: boolean;
     text?: string;
     data?: string;
     msg?: string;
@@ -401,9 +402,11 @@ class SstpHttpChannel extends Channel implements
                 .end((err, res) => {
                     const { code, data, text } = _getResult(err, res);
                     if (err) {
-                        resolve({ code });
+                        // Surface failure so callers can detect it (audit 04-F9); previously this
+                        // resolved without an `ok` flag and the queue reported success regardless.
+                        resolve({ ok: false, code, text });
                     } else {
-                        resolve({ data, text });
+                        resolve({ ok: true, data, text });
                     }
                 });
         });
@@ -419,15 +422,22 @@ class SstpHttpChannel extends Channel implements
         while (this.gcodeQueue.length > 0) {
             const splice = this.gcodeQueue.splice(0, 1)[0];
             const results = [];
+            let failed = false;
             for (const code of splice.gcodes) {
-                const { text } = await this._executeGcode(code) as GcodeResult;
+                const { ok, text } = await this._executeGcode(code) as GcodeResult;
                 if (text) {
                     results.push(text);
+                }
+                if (ok === false) {
+                    // Stop at the first failed line so later lines of a modal-critical sequence
+                    // (e.g. G53/G0 Z/G54) don't run after a failure (audit 04-F9).
+                    failed = true;
+                    break;
                 }
             }
 
             splice.callback && splice.callback({
-                result: 0,
+                result: failed ? -1 : 0,
                 text: results.join('\n'),
             });
         }

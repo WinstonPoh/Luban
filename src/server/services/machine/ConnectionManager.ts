@@ -29,6 +29,7 @@ import Channel, {
     AirPurifierChannelInterface,
     CncChannelInterface,
     EnclosureChannelInterface,
+    ExecuteGcodeResult,
     FileChannelInterface,
     LaserChannelInterface,
     NetworkServiceChannelInterface,
@@ -739,7 +740,16 @@ class ConnectionManager {
 
             // Move, Upload, Start
             Promise.all(promises)
-                .then(() => {
+                .then((results) => {
+                    // Abort if any preparatory move (e.g. G53/G0 Z<focal+thickness>/G54) failed.
+                    // Previously HTTP executeGcode always reported success, so a failed Z-focus move
+                    // was invisible and the job started at the wrong Z (audit 04-F9 / R8).
+                    const prepFailed = (results || []).some((r) => r && (r as ExecuteGcodeResult).result !== 0);
+                    if (prepFailed) {
+                        log.error('startGcode: preparatory move failed; aborting job start.');
+                        socket.emit(SocketEvent.StartGCode, { err: 'failed', text: 'Failed to set work position/origin before starting; job aborted.' });
+                        return;
+                    }
                     this.channel.uploadGcodeFile(gcodeFilePath, headType, renderName, (msg) => {
                         log.info(`uploadGcodeFile result:${msg}`);
                         if (msg) {
@@ -751,6 +761,10 @@ class ConnectionManager {
                         }
                         this.channel.startGcode(options);
                     });
+                })
+                .catch((e) => {
+                    log.error(`startGcode: preparatory sequence error; aborting job start. ${e}`);
+                    socket.emit(SocketEvent.StartGCode, { err: 'failed', text: 'Error preparing machine before start; job aborted.' });
                 });
         } else {
             // Serial port

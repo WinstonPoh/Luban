@@ -865,6 +865,12 @@ class SstpHttpChannel extends Channel implements
             .get(api)
             .end((err, res) => {
                 const currentModuleStatus = _getResult(err, res)?.data as any;
+                // On a failed/empty poll, do NOT cache undefined or emit a settings object whose
+                // fields are all undefined — that overwrites good enclosure values in redux until
+                // the next good poll (audit R20 / 01-F7). Skip and keep the last known values.
+                if (err || isNil(currentModuleStatus)) {
+                    return;
+                }
                 if (!isEqual(this.moduleSettings, currentModuleStatus)) {
                     this.moduleSettings = currentModuleStatus;
                     this.socket && this.socket.emit('Marlin:settings', {

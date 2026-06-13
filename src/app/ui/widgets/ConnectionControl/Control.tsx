@@ -17,6 +17,10 @@ import { MachineAgent } from '../../../flux/workspace/MachineAgent';
 import usePrevious from '../../../lib/hooks/previous';
 import { in2mm, mm2in } from '../../../lib/units';
 import { sequenceGoToOrigin } from '../../../lib/goToOriginSequence';
+import { originMoveNeedsConfirm } from '../../../lib/originPlausibility';
+import i18n from '../../../lib/i18n';
+import modal from '../../../lib/modal';
+import { Button } from '../../components/Buttons';
 import ControlPanel from './ControlPanel';
 import DisplayPanel from './DisplayPanel';
 import { DEFAULT_AXES, DISTANCE_MAX, DISTANCE_MIN, DISTANCE_STEP } from './constants';
@@ -254,9 +258,32 @@ const Control: React.FC<ConnectionControlProps> = ({ widgetId, isNotInWorkspace,
         // bed (audit R6 / 02-F2). Above the origin: XY first then descend Z; at/below: raise Z first.
         // Sent as one atomic multi-line executeGcode so the HTTP channel runs them strictly in order.
         goToWorkOrigin: () => {
-            const currentZ = parseFloat(state.workPosition?.z);
-            const lines = sequenceGoToOrigin({ z: Number.isFinite(currentZ) ? currentZ : 0 }, state.jogSpeed);
-            actions.executeGcode(lines.join('\n'));
+            const parsedZ = parseFloat(state.workPosition?.z);
+            const currentZ = Number.isFinite(parsedZ) ? parsedZ : 0;
+            const doMove = () => {
+                const lines = sequenceGoToOrigin({ z: currentZ }, state.jogSpeed);
+                actions.executeGcode(lines.join('\n'));
+            };
+            // The saved work origin survives homing / material / toolhead changes (audit R10 / 02-F4).
+            // If the move would descend well below the current Z, confirm before plunging.
+            if (originMoveNeedsConfirm({ currentZ, targetZ: 0 })) {
+                const popup = modal({
+                    title: i18n._('key-Workspace/Control/MotionButton-Go To Work Origin'),
+                    body: i18n._('The saved work origin is below the current position. If the material thickness or toolhead changed since it was set, the head may drive into the workpiece. Continue?'),
+                    footer: (
+                        <Button
+                            priority="level-two"
+                            type="primary"
+                            width="96px"
+                            onClick={() => { popup.close(); doMove(); }}
+                        >
+                            {i18n._('key-Modal/Common-Confirm')}
+                        </Button>
+                    ),
+                });
+            } else {
+                doMove();
+            }
         },
         coordinateMove: (gcode, moveOrders, jogSpeed) => {
             serverRef.current.coordinateMove(moveOrders, gcode, jogSpeed, headType);

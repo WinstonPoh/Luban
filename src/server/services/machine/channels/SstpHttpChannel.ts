@@ -402,9 +402,12 @@ class SstpHttpChannel extends Channel implements
                 .end((err, res) => {
                     const { code, data, text } = _getResult(err, res);
                     if (err) {
-                        // Surface failure so callers can detect it (audit 04-F9); previously this
-                        // resolved without an `ok` flag and the queue reported success regardless.
-                        resolve({ ok: false, code, text });
+                        // Surface genuine failures so callers can detect them (audit 04-F9).
+                        // Codes 202/203 are non-fatal machine statuses (see _getResult) that the rest
+                        // of the channel tolerates — treat them as success so we don't truncate
+                        // modal sequences (G53/G28/G54) or cancel valid jobs on a transient busy reply.
+                        const ok = code === 202 || code === 203;
+                        resolve({ ok, code, text });
                     } else {
                         resolve({ ok: true, data, text });
                     }

@@ -16,6 +16,7 @@ import { actions as workspaceActions } from '../../../flux/workspace';
 import { MachineAgent } from '../../../flux/workspace/MachineAgent';
 import usePrevious from '../../../lib/hooks/previous';
 import { in2mm, mm2in } from '../../../lib/units';
+import { sequenceGoToOrigin } from '../../../lib/goToOriginSequence';
 import ControlPanel from './ControlPanel';
 import DisplayPanel from './DisplayPanel';
 import { DEFAULT_AXES, DISTANCE_MAX, DISTANCE_MIN, DISTANCE_STEP } from './constants';
@@ -248,6 +249,14 @@ const Control: React.FC<ConnectionControlProps> = ({ widgetId, isNotInWorkspace,
         },
         executeGcode: (gcode) => {
             dispatch(workspaceActions.executeGcode(gcode));
+        },
+        // Go To Work Origin as two SEQUENCED moves so the head never travels diagonally into the
+        // bed (audit R6 / 02-F2). Above the origin: XY first then descend Z; at/below: raise Z first.
+        // Sent as one atomic multi-line executeGcode so the HTTP channel runs them strictly in order.
+        goToWorkOrigin: () => {
+            const currentZ = parseFloat(state.workPosition?.z);
+            const lines = sequenceGoToOrigin({ z: Number.isFinite(currentZ) ? currentZ : 0 }, state.jogSpeed);
+            actions.executeGcode(lines.join('\n'));
         },
         coordinateMove: (gcode, moveOrders, jogSpeed) => {
             serverRef.current.coordinateMove(moveOrders, gcode, jogSpeed, headType);

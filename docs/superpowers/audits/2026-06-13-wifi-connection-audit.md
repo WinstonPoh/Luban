@@ -9,7 +9,7 @@
 
 ## Executive summary
 
-Your three symptoms are all real and explained by concrete code defects — but **which defects bite you depends on one fact we can't determine from source: which transport your machine's touchscreen negotiates** (SACP over TCP port 8888, SACP over UDP port 8889, or legacy HTTP). Luban's protocol detector prefers TCP, then UDP, then HTTP, and detection re-runs on *every* connect (the client never passes a cached protocol). This pivotal unknown is the first thing to resolve live (5-minute read-only check, see §6).
+Your three symptoms are all real and explained by concrete code defects. Which defects bite you depended on one fact not determinable from source — which transport your machine negotiates — and a **live read-only check (§6) has now RESOLVED it: your A350 (firmware V1.21.0) connects over Wi-Fi via the legacy HTTP path (`AndServer` on port 8080), NOT SACP.** TCP 8888 is refused and UDP 8889 does not answer the SACP probe. This means the **HTTP-path findings are operative for you, and the SACP-only fixes (R1/R2/R3) do not affect your Wi-Fi usage** (they remain latent for USB-serial, which uses SACP). See §6 for the operative-vs-non-operative split and the revised Phase 2 order. The root-cause groups below are written transport-agnostic; the §6 split tells you which leg applies.
 
 The findings cluster into **five root causes**, most of which are single-point fixes with outsized impact:
 
@@ -141,9 +141,35 @@ Tier 3 (R10–R20) sequenced afterward.
 4. Firmware ACK timing for `0x01/0x35` home vs `0x01/0x36` completion (04-F3 assumes the documented design).
 5. Real-world frequency of renderer socket.io reconnects in Electron (how often 01-F12/03-F6 fires without multi-window use).
 
-## §6 — Recommended live read-only checks (safe, no motion)
+## §6 — Live read-only check: RESOLVED — this machine uses HTTP
 
-To resolve the pivotal unknowns before fixing, with the machine on and on-LAN (allowed ops only — connect, read state, light/fan, camera):
-1. **Transport:** `nc -z -v <machine-ip> 8888` and `... 8889`, plus watch Luban's server log line from `ProtocolDetector` on connect. Tells us TCP vs UDP vs HTTP → which of R2–R5 matter.
-2. **State surface:** with Chrome DevTools MCP attached to the renderer, snapshot the redux `workspace` store after connect; toggle the enclosure light/fan *from the touchscreen* and watch whether Luban's UI updates (confirms 01-F12 / module-refresh findings) — no motion involved.
-3. **HTTP field set (if HTTP):** capture one `/api/v1/status` response to confirm `headStatus` presence and `homed` polarity (01-F2/F10).
+**Performed 2026-06-13, read-only (no motion, no laser).** Machine `192.168.88.6`:
+
+- **Model A350, firmware V1.21.0**, HTTP server `AndServer/2.0.0`.
+- **TCP 8888 (SACP-TCP): refused.** SACP-over-TCP is not exposed.
+- **UDP 8889 (SACP-UDP): no reply** to the detector's exact `getMachineInfo` (`0x01/0x21`) query, sent via the vendored SDK with the socket bound to local 8889 (faithful replication of `SacpUdpChannel.test`). SACP-over-UDP is not answering.
+- **HTTP 8080: open**, serving the Snapmaker API; `/api/v1/status` returns `400` without a token (expected).
+
+**Conclusion:** `ProtocolDetector` (priority TCP→UDP→HTTP) selects **HTTP** for this machine. Despite V1.21.0 being SACP-capable over USB-serial, the Wi-Fi path is legacy HTTP/`AndServer`.
+
+### Consequence for fix prioritization — operative vs non-operative
+
+**Operative over the user's Wi-Fi (HTTP path) — these are the bugs that actually bite:**
+- R4 (01-F12/03-F6) — new socket kills HTTP poller → UI freeze. **state-desync.**
+- R5-HTTP (02-F5) — `isHoming` emitted `true` after completion, never `false` → homing modal sticks → **likely THE "slow homing" cause.**
+- R20 (01-F7) — HTTP poll silent failure; enclosure poll caches `undefined` and wipes good redux values. **state-desync.**
+- R6 (02-F2) — go-to-work-origin single-line diagonal descent, no Z-lift. **origin-crash.**
+- R7 (02-F3) — leaked `G53` (camera-aid no-`.catch`; `goHome` restores `G54` only for laser/CNC headType). **origin-crash.**
+- 04-F9 — HTTP `executeGcode` always reports `result:0` → preparatory `G0 Z<focal+thickness>` can fail silently, job starts at wrong Z. **origin-crash.**
+- R13 (02-F11) — `setWorkOrigin` drops zero-valued axes (AB-position/camera flows). **origin-crash contributor.**
+- R10 (02-F4) — stale saved origin restored after homing/material/toolhead change (firmware behavior, protocol-independent). **origin-crash.**
+- R9 (01-F2) — laser on/off: renderer coerces `!!headStatus` unconditionally; whether HTTP `/api/v1/status` supplies `headStatus` still unverified (needs a tokened capture), but the renderer guard fix is correct regardless. **state-desync.**
+- 01-F8, 02-F6, 02-F7 — module hot-plug one-shot; F-less travel-move feedrates; unclamped jog speed. (lower priority)
+
+**NOT operative over Wi-Fi (SACP-only) — deprioritized for this machine** (still latent if the user ever connects via USB-serial, which uses SACP):
+- R1 (04-F2 SACP no-timeout), R2 (01-F3 SACP-TCP Ready), R3 (01-F4 SM2 SACP subscriptions), 02-F1 (SACP MACHINE coord), 04-F3 (SACP homing-complete), 04-F10 (SACP origin-setup swallow).
+
+**Revised Phase 2 (HTTP-focused) recommended order:** R4 → R5-HTTP → R20 → R6 → R7 → 04-F9 → R13 → R10 → R9. All are unit-testable as logic; the motion-sequencing ones (R6/R7/R10) get a manual live-validation script for the user.
+
+### Still worth a live capture (optional, needs touchscreen "allow")
+- One tokened `/api/v1/status` body to confirm `headStatus` presence and `homed` polarity (01-F2 HTTP leg, 01-F10). Requires `POST /api/v1/connect` which prompts the touchscreen.

@@ -171,5 +171,19 @@ Tier 3 (R10–R20) sequenced afterward.
 
 **Revised Phase 2 (HTTP-focused) recommended order:** R4 → R5-HTTP → R20 → R6 → R7 → 04-F9 → R13 → R10 → R9. All are unit-testable as logic; the motion-sequencing ones (R6/R7/R10) get a manual live-validation script for the user.
 
-### Still worth a live capture (optional, needs touchscreen "allow")
-- One tokened `/api/v1/status` body to confirm `headStatus` presence and `homed` polarity (01-F2 HTTP leg, 01-F10). Requires `POST /api/v1/connect` which prompts the touchscreen.
+### Live capture (2026-06-13) — COMPLETED, read-only
+Auth handshake (confirmed working sequence): `POST /api/v1/connect` (no token) → `{token, readonly:false, series:"Snapmaker 2.0 A350", headType:4, hasEnclosure:true}` (**`headType:4` = 10W laser**); tap **Allow** on touchscreen; `POST /api/v1/connect` **with** `token=` → authorized; then `GET /api/v1/status?token=` → `200`. The flow is **fragile** (many spurious `401 "Machine is not connected yet."` before the second connect POST completes it; `disconnect` with token also returns `401`) — corroborates the connection-lifecycle/auth findings.
+
+**Captured `/api/v1/status` body:**
+```json
+{"status":"IDLE","x":112,"y":130,"z":150,"homed":false,"offsetX":0,"offsetY":0,"offsetZ":0,
+ "toolHead":"TOOLHEAD_LASER_2","laserFocalLength":31,"laserPower":0,"laserCamera":true,
+ "laser10WErrorState":0,"workSpeed":1500,"printStatus":"Idle",
+ "moduleList":{"enclosure":true,"rotaryModule":false,"emergencyStopButton":false,"airPurifier":false},
+ "isEnclosureDoorOpen":false,"doorSwitchCount":0}
+```
+
+**Confirmed:**
+- **01-F2 HTTP leg CONFIRMED (R9 operative):** no `headStatus` field — laser on/off is NOT reported over HTTP, only numeric `laserPower`. Renderer's unconditional `compareAndSet(..., 'headStatus', !!headStatus)` forces the toggle `false` every poll. *Fix:* derive on/off from `laserPower > 0` and guard `!isNil`.
+- **01-F10 HTTP polarity is NOT a bug:** `homed` is a correct boolean (`false` = not homed); HTTP `isHomed: data.homed` is right. Only SACP int-inverts. Drop the HTTP-inversion concern.
+- **Useful for feature specs:** status exposes `laserFocalLength`, `laser10WErrorState`, `laserCamera:true`, `toolHead` (`TOOLHEAD_LASER_2`), `isEnclosureDoorOpen`, `doorSwitchCount`, `workSpeed`, and coarse `moduleList` presence booleans (refreshed every 2 s poll — so enclosure hot-plug DOES update; only the detailed `module_list` *identity* endpoint is one-shot, the 01-F8 nuance).

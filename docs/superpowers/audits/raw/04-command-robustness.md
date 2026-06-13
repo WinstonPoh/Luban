@@ -133,6 +133,11 @@ Summary: **only 7 of ~90 request methods have any timeout/retry** (`requestAbsol
 - **Proposed fix:** In the catch, rethrow unknown errors (`throw err`). In Luban, guard `res?.response` before destructuring or wrap `send` with a typed result.
 - **Upstream-relevant:** yes
 
+### Verification
+- **Verdict:** confirmed
+- **Checked:** `Dispatcher.js:145-150` quoted verbatim: `.catch(function (err) { if (err.message === 'Retry send') { ... return _this.send(...); } })` — no `else`/`throw`, so any non-"Retry send" rejection makes the catch return `undefined` (a fulfillment). Source of the swallowed reject: `Communication.send` rejects `new Error('invalid SACP packet')` for buffers < 15 bytes (`Communication.js:116-117`) and `Dispatcher.send` itself rejects `'communication not initialize'` when `this.communication` is null (`Dispatcher.js:152`). Consumers destructure `({ response, packet })` from the result, e.g. `SacpClient.executeGcode` (`:180`), `setWorkOrigin` (`:412-423` returns raw `send`), confirming the TypeError-on-undefined path.
+- **Notes:** Confirmed. Note `'communication not initialize'` is rejected from `Dispatcher.send` *before* the `.then/.catch` chain is attached (`:152` is the function-level fallback return), so that particular reject is NOT swallowed by the `:145` catch — it propagates as a real rejection. The swallowed cases are the in-chain rejects: `'invalid SACP packet'` and any future `connection.write` throw. Substance of the finding stands. P1 appropriate.
+
 ## F2: No timeout for ~90% of SACP requests; disconnect orphans all in-flight requests
 - **Location:** `node_modules/@snapmaker/snapmaker-sacp-sdk/dist/communication/Communication.js:77-118` (timer only when `isRTO`), `Communication.js:47-54` (`dispose()` does `requestHandlerMap.clear()` without rejecting), `src/server/services/machine/channels/SacpTcpChannel.ts:39-48` (socket `close` only emits UI event), `SacpTcpChannel.ts:216,232` (`sacpClient.dispose()`)
 - **Severity:** P0
@@ -143,6 +148,11 @@ Summary: **only 7 of ~90 request methods have any timeout/retry** (`requestAbsol
 - **Proposed fix:** Add a default per-request timeout (configurable, e.g. 10-30 s) that rejects with a distinct `TimeoutError`; on `dispose()`/socket close, iterate `requestHandlerMap` and `fail(new Error('disconnected'))` each pending handler before clearing.
 - **Upstream-relevant:** yes
 
+### Verification
+- **Verdict:** confirmed
+- **Checked:** `Communication.send` (`Communication.js:77-119`): the `setTimeout` timer block is entirely inside `if (isRTO)` (`:95-108`); for `isRTO===false` it just registers the handler (`:86-93`), writes, and returns the Promise — no timer, pends forever on lost ack. `dispose()` (`:47-54`): `this.requestHandlerMap.clear()` with NO iteration/`fail()` of pending handlers — confirmed verbatim. `SacpTcpChannel.ts:39-48` `'close'` handler only emits `connection:close` to the UI, does not reject in-flight requests; `connectionClose` calls `sacpClient.dispose()` (`:216,232`) which → `Dispatcher.dispose` (`Dispatcher.js:83-89`) → `Communication.dispose` (clear without reject). Spot-checked the request table: `requestHome` (`SacpClient.ts:677-682`) `send(0x01,0x35,...)` no isRTO; `setWorkOrigin` (`:412-423`) no isRTO; `executeGcode` (`:179-183`) no isRTO; `wifiConnection` explicit `false` (`:1308`). RTO callers confirmed: `requestAbsoluteCooridateMove` (`:687` `true`), `getErrorReports`/`startPrint`/`stopPrint`/`pausePrint` (`:698,706,712,718` `true`).
+- **Notes:** Confirmed exactly, including "only RTO requests arm a timer" and "dispose clears without rejecting." The "~90%" is consistent with the table (7 RTO of ~90 methods). P0 strongly justified (homing/origin/laser/all G-code can hang forever). This is the SDK root-cause that several src/ findings (F3, F10, F11, F12, F16) depend on.
+
 ## F3: `goHome` never reports completion on the SACP path — homing modal hangs (SM2)
 - **Location:** `src/server/services/machine/ConnectionManager.ts:1292-1296` (callback never invoked, `goHome` not awaited), `src/server/services/machine/channels/SacpChannel.ts:830-846` (the only `isHoming:false` emitter, registered in `startHeartbeatLegacy`), `src/server/services/machine/instances/SM2Instance.ts:7-12` (SM2 uses modern `startHeartbeat`, never `startHeartbeatLegacy`), `src/app/flux/workspace/index.ts:647-659, 986-992`
 - **Severity:** P0
@@ -152,6 +162,11 @@ Summary: **only 7 of ~90 request methods have any timeout/retry** (`requestAbsol
 - **Evidence:** Grep of server tree shows exactly three `isHoming` emit sites: `ConnectionManager.ts:1296,1305` (`true`) and `SacpChannel.ts:845` (`false`). `machine-handlers.ts:17` maps `SocketEvent.GoHome` directly to `connectionManager.goHome`; `SocketManager/index.ts:90-96` passes the client ack as the last param, which the SACP branch ignores.
 - **Proposed fix:** In the SACP branch, `await this.channel.goHome()` and then invoke `callback`/emit `move:status {isHoming:false}` based on the `requestHome` ack result; register the `0x01/0x36` completion handler in the modern heartbeat path too (or in `SacpChannelBase` setup).
 - **Upstream-relevant:** yes
+
+### Verification
+- **Verdict:** confirmed
+- **Checked:** `ConnectionManager.goHome` (`:1292-1311`): SACP branch (`:1294-1296`) does `this.channel.goHome(headType)` (un-awaited) + `socket.emit('move:status', {isHoming:true})` and never calls `callback` (only the non-SACP else-branch calls `callback()` at `:1301`). `machine-handlers.ts:17` maps `SocketEvent.GoHome → connectionManager.goHome`; `SocketManager` passes the client ack as the last param (`:90-96`) which the SACP branch drops. `isHoming:false` emit sites: `grep -rn isHoming src/server` → exactly `ConnectionManager.ts:1296,1305` (`true`) and `SacpChannel.ts:845` (`false`). The `:845` emitter is inside the `setHandler(0x01,0x36, ...)` registered ONLY in `startHeartbeatLegacy` (`SacpChannel.ts:830-846`). `SM2Instance.onPrepare` (`SM2Instance.ts:7-12`) calls `this.channel.startHeartbeat()` (modern) — never `startHeartbeatLegacy`. Artisan/J1/Ray call `startHeartbeatLegacy` (`ArtisanInstance.ts:89`, `J1Instance.ts:90`, `RayInstance.ts:111`).
+- **Notes:** Confirmed structurally. The 0x36 handler gap for SM2 over modern heartbeat is real; combined with F2 (requestHome no timeout) and the un-awaited call, the homing modal has no completion path on SM2/SACP. Caveat (audit Open Question #2): exact firmware ack timing for 0x01/0x35 vs 0x01/0x36 is unverified, but the *client-side structural gap* (no emitter is even registered on the SM2 path) holds regardless of firmware. Note: SM2-over-SACP also depends on reaching the modern heartbeat at all — over TCP it never reaches Ready (file 03 F8), so this bites SM2 over UDP. P0 reasonable given safety relevance; flag the firmware-timing dependency.
 
 ## F4: RTO timeout fabricates a normal-looking response (`result=2`); dead `hasResponse` guard
 - **Location:** `node_modules/@snapmaker/snapmaker-sacp-sdk/dist/communication/Communication.js:96-107`; consumers `src/server/services/machine/channels/SacpChannel.ts:1309-1330` (`stopGcode`/`pauseGcode`/`resumeGcode`)
@@ -193,6 +208,11 @@ Summary: **only 7 of ~90 request methods have any timeout/retry** (`requestAbsol
 - **Proposed fix:** After the scan, if the last unconsumed byte is `0xaa`, retain it in `receiveBuffer` (set `receiving=true, remainLength=-1`). More generally, keep all unconsumed trailing bytes instead of discarding them.
 - **Upstream-relevant:** yes
 
+### Verification
+- **Verdict:** confirmed
+- **Checked:** `Communication.receive` (`Communication.js:120-161`), not-receiving branch. When `buffer.byteLength >= 7`, line 124 sets `isIncompleteBuffer = false`; the scan loop `for (i = 0; i < buffer.byteLength - 1; i++)` (`:125`) inspects pairs `(i, i+1)`, so the final byte at index `byteLength-1` is never examined as a potential lead `0xaa`. If the chunk ends in a lone `0xaa` and no earlier complete magic triggered the incomplete-buffer/remainLength path, the loop exits with `isIncompleteBuffer` still false → the `if (isIncompleteBuffer)` tail (`:155-160`) does not run → the trailing `0xaa` is dropped (function returns, `receiveBuffer` not appended). Next chunk starts at `0x55...`, never matches `0xaa 0x55`. The mid-packet save paths (`:140-144` remainLength, `:147-151` incomplete) only engage when a full two-byte magic + CRC8 were seen.
+- **Notes:** Confirmed as a real boundary bug. Practical exploitability depends on TCP actually splitting precisely between the two magic bytes — uncommon but legal and non-zero over a busy/lossy link; the consequence chain (drop ACK → F2 hang; drop heartbeat → F3-file03 watchdog force-close) is sound. Note: not exercised on UDP (datagram = whole packet), only the TCP stream channel — audit Open Question #3 already flags UDP framing. P1 is defensible but the trigger is narrow; "high" confidence applies to the code path, not to field frequency.
+
 ## F8: Checksum/CRC failures silently drop packets with no NAK or retry signal
 - **Location:** `node_modules/@snapmaker/snapmaker-sacp-sdk/dist/communication/Communication.js:197-223` (`reolvePacketBuffer` + `validateChecksum`), `Communication.js:128-129` (CRC8 header check)
 - **Severity:** P2
@@ -213,6 +233,11 @@ Summary: **only 7 of ~90 request methods have any timeout/retry** (`requestAbsol
 - **Proposed fix:** Make `_executeGcode` resolve a structured `{ ok, code, text }`; propagate the worst per-line result through `consumeGCodeQueue` into the callback; in `startGcode`, abort and emit an error event if any preparatory move failed.
 - **Upstream-relevant:** yes
 
+### Verification
+- **Verdict:** confirmed
+- **Checked:** `_executeGcode` (`SstpHttpChannel.ts:387-404`): on `err` it `resolve({ code })` (`:397-398`) — resolves, never rejects, no failure flag. `consumeGCodeQueue` (`:406-430`): collects only `text` from each line (`:417-420`), ignores any error/code, and unconditionally calls `splice.callback({ result: 0, text: ... })` (`:423-426`). `executeGcode` (`:435-458`): callback's `result===0` branch always taken → resolves `{result:0}`; the `result:-1` branch (`:447-450`) is dead. Consumers gating on success confirmed: `turnOnTestLaser` (`:487-493`), `setSpindleSpeed` (`:530-531`), `spindleOn/Off` (`:552-560`). `ConnectionManager.startGcode` HTTP path pushes `executeGcode(...)` promises (`:702-736`) then `Promise.all(promises).then(() => { uploadGcodeFile...; startGcode... })` (`:741-754`) with no `.catch` and no result inspection.
+- **Notes:** Confirmed exactly, including the dead `result:-1` branch. The origin-crash scenario (silent failure of `G53;\nG0 Z<focal+thickness>;\nG54;` preparatory move at `:704`/`:710`) is real for the HTTP/SM2 laser path. P1 appropriate (arguably borders P0 given origin-crash mapping, but leaving severity to author). Mechanism overlaps the "result not checked / job starts anyway" theme of F10/F12 on the HTTP side specifically.
+
 ## F10: `setAbsoluteWorkOrigin` catch swallows failures; job start proceeds with wrong origin
 - **Location:** `src/server/services/machine/channels/SacpChannel.ts:1510-1550` (catch at 1547-1549), `SacpChannel.ts:1288-1307` (`setWorkOrigin` ignores result), callers `ConnectionManager.ts:664-689` (`startGcode` SACP laser path)
 - **Severity:** P0
@@ -222,6 +247,11 @@ Summary: **only 7 of ~90 request methods have any timeout/retry** (`requestAbsol
 - **Evidence:** `SacpChannel.ts:1547-1549`: `catch (e) { log.error(\`getLaserMaterialThickness error: ${e}\`); }`. `ConnectionManager.ts:673-689`: sequential `await this.channel.laserSetWorkHeight(…)`, `await this.channel.setAbsoluteWorkOrigin(…)`, `await this.channel.coordinateMove(…)` with no result checks and no try/catch of its own.
 - **Proposed fix:** Make `setAbsoluteWorkOrigin`/`laserSetWorkHeight`/`coordinateMove` return success booleans derived from each `response.result`; rethrow or return false from the catch; in `startGcode`, abort job start and emit `SocketEvent.StartGCode {err}` when origin setup fails.
 - **Upstream-relevant:** yes
+
+### Verification
+- **Verdict:** confirmed
+- **Checked:** `SacpChannel.setAbsoluteWorkOrigin` (`:1510-1550`): wraps `updateCoordinate(MACHINE)` → `getCurrentCoordinateInfo` → `updateCoordinate(WORKSPACE)` → `setWorkOrigin(newCoord)` in `try { ... } catch (e) { log.error(\`getLaserMaterialThickness error: ${e}\`); }` (`:1547-1549`) — confirmed verbatim, including the copy-pasted misleading message; no rethrow, no result check; method returns `void`/undefined. `SacpChannel.setWorkOrigin` (`:1288-1307`): `await this.sacpClient.setWorkOrigin(...).then(res => log.info(\`Set Work Origin: ${res.data}\`))` — `response.result` never inspected. `coordinateMove` (`:1272-1286`): logs `res.response.result` and emits a `serialport:read` string, returns undefined. `SacpClient.setWorkOrigin` (`:412-423`) returns raw `send` result. `ConnectionManager.startGcode` SACP laser path (`:664-689`): sequential `await laserSetWorkHeight(...)`, `await setAbsoluteWorkOrigin(...)`, `await coordinateMove(...)` — none returns a checkable value, no try/catch, and job proceeds to upload+start via the shared `Promise.all(promises).then(...)` (`:741-754`).
+- **Notes:** Confirmed exactly. Because `setAbsoluteWorkOrigin` swallows internally AND its callers can't read a result, a failed/timed-out origin sequence (e.g. F2 hang resolved by reconnect, or a `result!==0`) silently proceeds to cut at the previous origin/Z — a genuine origin-crash. P0 justified. `laserSetWorkHeight` (`:1553-1573`) calls `setAbsoluteWorkOrigin` and likewise returns void, reinforcing the chain.
 
 ## F11: Fire-and-forget command methods in SacpChannel leave Luban state wrong on failure
 - **Location:** `src/server/services/machine/channels/SacpChannel.ts:695-702` (`setFilterWorkSpeed`), `1367-1377` (`switchExtruder` — result ignored), `1382-1394` (`updateNozzleTemperature` — failure ignored), `1396-1419`/`1421-1444` (`loadFilament`/`unloadFilament` — line 1432 `ExtruderMovement` not awaited), `1446-1460` (`updateBedTemperature` — `.then` with no catch, result ignored), `1492-1508` (`updateWorkSpeed` — results only logged), `1288-1307` (`setWorkOrigin`), `SacpTcpChannel.ts:101` (`wifiConnectionHeartBeat()` floating)
@@ -233,6 +263,11 @@ Summary: **only 7 of ~90 request methods have any timeout/retry** (`requestAbsol
 - **Proposed fix:** Have each command method `await` the ack, return `boolean` from `response.result === 0`, and have ConnectionManager emit the corresponding SocketEvent error so the UI can revert optimistic state.
 - **Upstream-relevant:** yes
 
+### Verification
+- **Verdict:** confirmed
+- **Checked:** `SacpChannel.switchExtruder` (`:1367-1377`): `await this.sacpClient.SwitchExtruder(module.key, newExtruderIndex)` — return discarded, method returns void. `updateNozzleTemperature` (`:1382-1394`): checks `response.result===0` only to log, no failure signal. `loadFilament` (`:1396-1419`)/`unloadFilament` (`:1421-1444`): `unloadFilament` line 1432 `this.sacpClient.ExtruderMovement(...)` not awaited. `updateBedTemperature` (`:1446-1460`): `this.sacpClient.setHotBedTemperature(...).then(() => log.info(...))` — no `.catch`, result ignored (`:1457-1459`). `updateWorkSpeed` (`:1492-1508`): results only logged. `setWorkOrigin` (`:1288-1307`) as in F10. `SacpTcpChannel.ts:101` `this.sacpClient.wifiConnectionHeartBeat()` floating (un-awaited). Callers in ConnectionManager (`switchExtruder:944`, `updateNozzleTemperature:962`, `updateBedTemperature:977-978`, `updateWorkSpeedFactor:1022`, `loadFilament:995`, `unloadFilament:1008`, `setWorkOrigin:1332`) do not await and emit no failure event.
+- **Notes:** Confirmed. The `updateBedTemperature` un-caught `.then()` does convert an F1-style undefined-destructure TypeError into an unhandled rejection (it has no `.catch`). Optimistic-state-drift (e.g. `currentWorkNozzle` after a rejected `SwitchExtruder`) is real. P1 appropriate. Overlaps F10/F12 on the unchecked-result theme; the distinct angle here is the fire-and-forget *command* methods (vs F10's origin-setup sequence).
+
 ## F12: ConnectionManager fires async channel methods without await/catch — silent flow death and hung client acks
 - **Location:** `src/server/services/machine/ConnectionManager.ts:651` (`startGcodeAction`), `741-754` (`Promise.all(...).then()` with no `.catch`), `1295` (`goHome`), `1322` (`coordinateMove`), `1332` (`setWorkOrigin`), `944`, `962`, `977-978`, `1242` (`startHeartbeat`); rejection sink: `src/server/app.js:294-300`; dispatch glue: `src/server/lib/SocketManager/index.ts:90-96`
 - **Severity:** P1
@@ -242,6 +277,11 @@ Summary: **only 7 of ~90 request methods have any timeout/retry** (`requestAbsol
 - **Evidence:** `ConnectionManager.ts:1313-1327`: SACP branch `this.channel.coordinateMove({…})` — no `await`, no `callback()`. `app.js:298-300`: `process.on('unhandledRejection', … log.error …)`.
 - **Proposed fix:** `await` channel calls inside try/catch; always invoke the socket ack callback with an `{ err }` payload in both branches.
 - **Upstream-relevant:** yes
+
+### Verification
+- **Verdict:** confirmed
+- **Checked:** `machine-handlers.ts:9-87` maps socket events directly to async ConnectionManager methods; `SocketManager.onConnection` wraps them as `socketEventFn = (...params) => callback(socket, ...params)` and registers via `socket.on(event, socketEventFn)` (`:90-96`) — the returned promise is discarded. `ConnectionManager.coordinateMove` (`:1313-1327`): SACP branch `this.channel.coordinateMove({...})` un-awaited, no `callback()`; else-branch calls `callback()` (`:1325`). `setWorkOrigin` (`:1329-1342`): SACP branch un-awaited, no callback; else-branch calls `callback()` (`:1340`). `goHome` (`:1295`) as F3. `startGcode` `Promise.all(...).then()` no `.catch` (`:741-754`). `app.js:294-300` confirmed: process-level `uncaughtException`/`unhandledRejection` only `log.error`.
+- **Notes:** Confirmed. The client ack (3rd param to `coordinateMove`/`setWorkOrigin`) is genuinely never invoked on SACP even on success, so any UI flow awaiting that ack hangs; combined with F2 the rejection-on-null-channel path is also real. P1 appropriate. Strongly overlaps F3 (homing is the specific case) and the fire-and-forget theme of F11 — note as a family: the systemic issue is "ConnectionManager SACP branches don't await, don't catch, and don't always ack."
 
 ## F13: `configureMachineNetwork` only replies on success (and with an inverted message)
 - **Location:** `src/server/services/machine/ConnectionManager.ts:1448-1473` (lines 1461-1466)
@@ -282,6 +322,11 @@ Summary: **only 7 of ~90 request methods have any timeout/retry** (`requestAbsol
 - **Evidence:** `SacpChannel.ts:234-239`: `gcodeLines.forEach(…promises.push(this.sacpClient.executeGcode(_gcode))); const results = await Promise.all(promises);`
 - **Proposed fix:** Send lines sequentially (`for … await`), stop at first non-zero result; consider a per-channel command queue mirroring SstpHttpChannel's.
 - **Upstream-relevant:** yes
+
+### Verification
+- **Verdict:** confirmed
+- **Checked:** `SacpChannelBase.executeGcode` (`SacpChannel.ts:231-254`): `gcode.split('\n')`, then `gcodeLines.forEach(_gcode => promises.push(this.sacpClient.executeGcode(_gcode)))` and `const results = await Promise.all(promises)` (`:235-239`) — all lines dispatched concurrently, results inspected only after all settle (`:242-248`), so a failure of an earlier line does not stop later lines (they're already in flight). `SacpClient.executeGcode` → `send(0x01,0x02,...)` no isRTO (`:179-183`). `Communication.send` writes straight to socket (`:94`) → `TCPConnection.write` = `this.socket.write(buffer)` with no return/backpressure/error handling (`TCPConnection.js:14-16`). No queue/serialization on the SACP channel (contrast `SstpHttpChannel.gcodeQueue`/`isGcodeExecuting` `:124-126,406-430`). `ConnectionManager.executeGcode` (`:420-430`) `await this.channel.executeGcode(gcode)` has no try/catch.
+- **Notes:** Confirmed. The "medium" confidence is apt: ordered execution depends on firmware processing 0x01/0x02 in arrival order, which static analysis cannot rule in or out — the *application* provides no ordering guarantee, which is the verifiable part. The `Promise.all` rejection → unhandled rejection → client ack never fires path is real (ties to F1/F12). Note the UDP channel overrides `executeGcode` to send a single request (`SacpUdpChannel.ts:122-136`), so this concurrency issue is specific to the TCP/serial base `executeGcode`. P1 defensible for the no-serialization + unhandled-rejection aspects.
 
 ## F17: Subscription setup results unchecked / `.then` without `.catch` throughout heartbeat bring-up
 - **Location:** `src/server/services/machine/channels/SacpChannel.ts:160-162, 815-827, 884-886, 963-965, 1019-1021, 1050-1052, 1063-1065, 1075-1077, 1116, 1117-1120, 1145-1147, 1161-1163, 1175-1177`

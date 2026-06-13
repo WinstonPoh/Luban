@@ -34,6 +34,11 @@ Workflow status semantics also differ: HTTP lowercases the screen's status strin
 - **Proposed fix:** Re-query `getModuleInfo()` periodically (or subscribe to SACP module-change report if available) and emit a dedicated `machine:module-list` event; decouple emission of subscription data from the heartbeat callback (emit per-subscription, throttled).
 - **Upstream-relevant:** yes
 
+### Verification
+- **Verdict:** confirmed
+- **Checked:** Re-read `SacpChannel.startHeartbeatLegacy` (`SacpChannel.ts:802-1178`): `let stateData` (:806), `moduleStatusList` closure (:808-813), single `getModuleInfo()` call (:889), all 8 subscription callbacks (hotbed :954, nozzle :966, coordinate :1022, cnc :1053, laser :1066, gcodeLine :1080, enclosure :1121, purifier :1165) only mutate the closure `stateData`; sole emit of `Marlin:state` in `subscribeHeartCallback` (:870-877) as `{...stateData, moduleStatusList, status, moduleList: moduleStatusList}`. Confirmed line :893 `this.moduleInfos = {}` then repopulates with raw `MODULEID_MAP` (:924-940), bypassing `getModuleIdentifier()` dual-extruder disambiguation used at :353 in `getModuleInfo()`.
+- **Notes:** All cited lines accurate. No re-invocation of `getModuleInfo()` after :889 found anywhere in the channel. The auditor's `headType`/`toolHead` line range "910-951" is correct (head inference :910-922, toolHead :943-951). No mitigating re-query path exists. Note this finding is only operative for instances that call `startHeartbeatLegacy` (Artisan/J1/Ray via `_onMachineReadySACP`); SM2Instance uses the sparse `startHeartbeat` and is covered by F4. Severity P1 appropriate.
+
 ## F2: Laser on/off (`headStatus`) is never reported over SACP and is coerced to `false` every beat — the UI laser toggle cannot reflect machine-side changes
 
 - **Location:** `src/app/flux/workspace/index.ts:485` (`compareAndSet(data, currentState, 'headStatus', !!headStatus)`); `src/server/services/machine/channels/SacpChannel.ts:1066-1077`; `src/app/ui/widgets/ConnectionToolControl/LaserToolControl.tsx:40,98`
@@ -44,6 +49,11 @@ Workflow status semantics also differ: HTTP lowercases the screen's status strin
 - **Evidence:** Emit path SACP: `subscribeLaserPowerState` (SacpClient.ts:1249-1253, command 0x12/0xa1) → callback `SacpChannel.ts:1066-1074` → closure `stateData.laserPower` → heartbeat emit :870-877 → `'Marlin:state'` → `workspace/index.ts:440-447` (laserPower) and :485 (`headStatus` forced `!!undefined === false`) → `LaserToolControl.tsx:98`.
 - **Proposed fix:** In the renderer, only update `headStatus` when the field is present (`!isNil(headStatus)` guard like the neighbouring fields); on SACP, derive `headStatus` from `laserTargetPower > 0` (already parsed at SacpChannel.ts:1068) and include it in `stateData`.
 - **Upstream-relevant:** yes
+
+### Verification
+- **Verdict:** confirmed
+- **Checked:** Renderer `Marlin:state` handler in `workspace/index.ts`: confirmed the cited line reads `compareAndSet(data, currentState, 'headStatus', !!headStatus);` and is UNCONDITIONAL (no `!isNil` guard), unlike the neighbouring `laserPower`/`temperature`/`moduleStatusList`/`airPurifier` blocks which are all `!isNil`-guarded. SACP `subscribeLaserPowerCallback` (`SacpChannel.ts:1066-1074`) writes only `laserPower` (currentPower) and `laserTargetPower` into `stateData`; no `headStatus` key. Grepped the whole `src/server` tree — no SACP code path emits a `headStatus` field. Firmware ground truth (sub-agent verified): `Snapmaker2-Controller` reports only numeric laser power to the screen (`system.cpp:1843` `tmp_u32 = (uint32_t)(laser->power()*1000)`; struct field `system.h:207 laser_power_cnc_rpm`); internal `is_laser_on` (`system.cpp:175,724`) is never serialized to the screen. `laser->state()` getter (`toolhead_laser.h:236`) is unused in any report path.
+- **Notes:** Confirmed on every leg. Minor citation nit: the auditor names `sta.laser_power` / lines 1771-1773 in system.cpp — that exact name exists only in a dead `#if 0` block; the live numeric field is `laser_power_cnc_rpm` (system.h:207, written at system.cpp:1843). Substance (numeric only, no boolean) is correct. The HTTP-side medium-confidence caveat (whether `/api/v1/status` supplies `headStatus`) remains unknowable-statically (closed-source screen) but does not affect the SACP P0 verdict. Severity P0 appropriate.
 
 ## F3: SM2 (A150/A250/A350) over SACP-TCP never gets `ChannelEvent.Ready` — no machine instance, no heartbeat, no state subscription at all
 
@@ -56,6 +66,11 @@ Workflow status semantics also differ: HTTP lowercases the screen's status strin
 - **Proposed fix:** Emit `ChannelEvent.Ready { machineIdentifier }` unconditionally in `SacpTcpChannel.connectionOpen()` (mirroring the serial/UDP channels) and let `ConnectionManager.onChannelReady` decide which instance to build; pair with F4 so SM2's `onPrepare` actually subscribes to state.
 - **Upstream-relevant:** yes
 
+### Verification
+- **Verdict:** confirmed (code path); unknowable-statically (whether a real SM2 screen opens TCP:8888 in the field)
+- **Checked:** `SacpTcpChannel.connectionOpen` (re-read :104-117): `machineIdentifier = SACP_TYPE_SERIES_MAP[machineInfos.type]` (:106), then emits `ChannelEvent.Ready` ONLY inside `if (machineIdentifier === SnapmakerArtisanMachine.identifier)` (:108-112) and `if (=== SnapmakerJ1Machine.identifier)` (:113-117). No `else`/unconditional emit. Compared `SacpSerialChannel`/`SacpUdpChannel` which emit Ready unconditionally (auditor's claim). `ProtocolDetector.detectNetworkProtocol` (:104-120) runs all three probes via `Promise.allSettled` and returns `SacpOverTCP` first when the TCP probe fulfils (:111-112), HTTP only as fallback (:115) — confirms TCP preference. `SM2Instance` (full file, 15 lines) `onPrepare` calls only `this.channel.startHeartbeat()`. Dead-code fallback confirmed: `connectionManager.startHeartbeat` (`ConnectionManager.ts:1240-1242`) has NO registration in `machine-handlers.ts` and no client `SocketEvent.StartHeartbeat` usage (grepped `src/app`).
+- **Notes:** Mechanism fully confirmed. The one unverifiable leg is whether recent SM2 touchscreen firmware actually listens on TCP:8888 (closed-source screen) — if it does not, the HTTP fallback is taken and F3 does not fire in the field. The auditor already flags this as the medium-confidence portion and lists it as open question #1. Severity P0 appropriate conditional on the screen exposing 8888.
+
 ## F4: `SM2Instance.onPrepare`/new-style `startHeartbeat()` subscribes only to machine status + air purifier — coordinates, temperatures, laser power, module status would stay permanently stale
 
 - **Location:** `src/server/services/machine/channels/SacpChannel.ts:165-208`; `src/server/services/machine/instances/SM2Instance.ts:7-12`
@@ -66,6 +81,11 @@ Workflow status semantics also differ: HTTP lowercases the screen's status strin
 - **Evidence:** `startHeartbeat()` body contains exactly two subscriptions (`SacpChannel.ts:205-206`); `SM2Instance.onPrepare` calls only `this.channel.startHeartbeat()` (SM2Instance.ts:11) and registers no error-report handler (`registerErrorReportHandler` is only called from Artisan/J1/Ray instances, e.g. ArtisanInstance.ts:91).
 - **Proposed fix:** Make `SM2Instance.onPrepare` perform the same module scan + subscription set as `ArtisanInstance._onMachineReadySACP()` (module info, coordinate info, `connection:connected` emit, full subscription set, error-report handler).
 - **Upstream-relevant:** yes
+
+### Verification
+- **Verdict:** confirmed
+- **Checked:** `SacpChannel.startHeartbeat` (re-read :165-208): body subscribes to exactly two things — `subscribeHeartbeat({interval:2000}, ...)` (:205) and `this.subscribePurifierInfo()` (:206). The heartbeat callback emits only `Marlin:state {state:{status}}` (:198-202) — no pos/originOffset/temps/laser/enclosure. No coordinate (0x01/0xa2), hotbed, nozzle, cnc, laser-power, or enclosure subscription, and no `connection:connected` emit, no 0x36 home handler, no `setROTSubscribeApi`/`registerErrorReportHandler`. `SM2Instance.onPrepare` (full file) calls only `await this.channel.startHeartbeat()`. Confirmed `registerErrorReportHandler` is called only from ArtisanInstance:91, J1Instance:92, RayInstance:118 — never SM2Instance (grepped instances dir).
+- **Notes:** All claims confirmed. Note the heartbeat interval is 2000 ms here (:205) vs the legacy path's 1000 ms — a minor correction to the inventory table row which says SACP heartbeat is "1s"; that 1s figure is the legacy path (:884), the new SM2 path is 2s. Does not change the finding. Reachable today over SACP-serial (SacpSerialChannel emits Ready unconditionally) and would be the second half of the F3 Wi-Fi dead-end. Severity P1 appropriate.
 
 ## F5: `connectionClose()` never unsubscribes (code commented out); singleton channels keep stale state across sessions
 
@@ -89,6 +109,11 @@ Workflow status semantics also differ: HTTP lowercases the screen's status strin
 - **Proposed fix:** Use one timer keyed consistently (or pass `this.id` into `startHeartbeatLegacy`), and clear *all* legacy timers in `stopHeartbeat()`; pass the stored `subscribeHeartCallback` to `unsubscribeHeartbeat`.
 - **Upstream-relevant:** yes
 
+### Verification
+- **Verdict:** partially-confirmed (primary key-mismatch confirmed; secondary "removeListener throws" claim refuted)
+- **Checked:** `heartbeatTimerLegacy` is an array field (`SacpChannel.ts:88`). `startHeartbeatLegacy` default param `id = 'uuid'` (:802), arms `this.heartbeatTimerLegacy['uuid'] = setTimeout(...)` (:861), fires `connection:close` (:864). `ArtisanInstance` declares `id = uuidv4()` (:26) and `onClosing` calls `stopHeartbeat(this.id)` (:113); `_onMachineReadySACP` calls `startHeartbeatLegacy(sacpClient, undefined)` (:89) — so the timer is keyed `'uuid'` but `stopHeartbeat` looks up `heartbeatTimerLegacy[<uuidv4>]` (:218) → wrong key, orphan timer survives. CONFIRMED. Checked SDK `Dispatcher.unsubscribe` (`Dispatcher.js:227-243`): it calls `removeListener(businessId, callback)` only when `listenerCount(businessId) > 1`, else `removeAllListeners`.
+- **Notes:** Primary defect (key mismatch → zombie 10 s timer → spurious `connection:close` after reconnect) is solid. CORRECTION to the secondary claim: the finding says `removeListener(businessId, null)` "throws if more than one listener is registered (Dispatcher.js:233-236)" — this is inaccurate. Node's `EventEmitter.removeListener` with a null/non-matching listener is a silent no-op, it does not throw; and `stopHeartbeat` does not even reach that path because it calls `sacpClient.unsubscribeHeartbeat(null)` whose own dispatcher branch only triggers `removeListener` when there are >1 listeners (then no-ops on null) and `removeAllListeners` otherwise. So the "throws" consequence should be struck; the real residual bug is that the heartbeat listener may not be removed (leak), not a thrown exception. Recommend keeping P1 for the zombie-timer mechanism but removing the throw claim from the writeup.
+
 ## F7: HTTP polling loop fails silently — non-timeout errors produce no UI signal until 3 consecutive failures, and module/enclosure poll errors are swallowed forever
 
 - **Location:** `src/server/services/task-manager/workers/heartBeat.ts:38-52` (poll cadence :76 = 2000 ms, request timeout :37 = 3000 ms, screen grace :11 = 8 s); `src/server/services/machine/channels/SstpHttpChannel.ts:571-579, 589-597, 860-873`
@@ -100,6 +125,11 @@ Workflow status semantics also differ: HTTP lowercases the screen's status strin
 - **Proposed fix:** Emit an explicit `machine:state-stale` (or set a `lastUpdated` timestamp in `Marlin:state`) on first poll failure; guard `getEnclosureStatus` against `err`/empty data before emitting/caching.
 - **Upstream-relevant:** yes
 
+### Verification
+- **Verdict:** confirmed
+- **Checked:** `heartBeat.ts` (full re-read): poll on success emits `{status:'online', ...}` (:59-67); on error, if `Timeout` arms an 8 s `screenTimeout` grace (:42-45), else `errorCount++` and only `>=3` triggers `stopBeat`→`offline` (:48-51); nothing emitted on individual non-third failure. `screenTimeout = 8*1000` (:11), request `.timeout(3000)` (:37), `setInterval(beat, 2000)` (:76). Confirmed `getModuleInfo`/`getModuleList` use `if (!err)` with no else (`SstpHttpChannel.ts:574, 592`). Confirmed `getEnclosureStatus` (:856-873): on error `_getResult(err,res)?.data` is `undefined`, `isEqual(this.moduleSettings /* prev object */, undefined)` is false → caches `undefined` at :863 and emits `Marlin:settings` with all four fields `undefined` (:866-869).
+- **Notes:** All cited mechanisms confirmed. The renderer-side overwrite claim (plain Object.assign reducer accepting `undefined`) is the load-bearing consequence and is consistent with the `Marlin:settings` handler being unconditional. Severity P1 appropriate.
+
 ## F8: Module attach state over HTTP is fetched exactly once per connection (`module_list`), so hot-plug/attach changes never reach the UI
 
 - **Location:** `src/server/services/machine/channels/SstpHttpChannel.ts:261` (one-shot `getModuleList()`), 565-580; renderer merge `src/app/flux/workspace/index.ts:521-561`
@@ -110,6 +140,11 @@ Workflow status semantics also differ: HTTP lowercases the screen's status strin
 - **Evidence:** single call site of `getModuleList` (grep: only `SstpHttpChannel.ts:261`); `moduleList` absent from the reset list at `actions-connect.ts:104-126` and from `close()` (workspace/index.ts:1006-1061).
 - **Proposed fix:** Poll `module_list` on the same 1 s interval (or refresh it whenever `module_info` returns a key not present in the cached list), and clear `moduleList` in `resetMachineState`.
 - **Upstream-relevant:** yes
+
+### Verification
+- **Verdict:** confirmed
+- **Checked:** `connectionOpen` calls `this.getModuleList()` once at :261 (a bare call, NOT wrapped in `setInterval`), while `getEnclosureStatus` and `getModuleInfo` are installed on 1000 ms `setInterval` (:264-269). `getModuleList` (:565-579) is the only emitter of `machine:module-list`. Renderer `machine:module-list` handler (`workspace/index.ts:521-526`) just sets `moduleList`. `machine:module-info` handler (:543-577) reads the OLD `moduleList = getState().workspace.moduleList` (:546), builds `newModuleList` by key-merge `moduleList.find(v=>v.key===m.key)` (:548-558) — entries without a matching prior `module_list` row carry only info fields, no `moduleId`/`status`. `moduleList` absent from `resetMachineState` (actions-connect.ts:102-128, grep confirmed no match).
+- **Notes:** All confirmed. Cross-references F1 correctly: SACP never emits `machine:module-list` (grep: only emitter is SstpHttpChannel:575), so `moduleList` is never cleared on disconnect and leaks across sessions. Severity P1 appropriate.
 
 ## F9: Server-side change-dedup caches survive reconnect and renderer restarts — first post-reconnect state can be suppressed
 
@@ -144,6 +179,11 @@ Workflow status semantics also differ: HTTP lowercases the screen's status strin
 - **Proposed fix:** Add a default timeout (e.g. 5 s reject) to non-RTO sends in the SDK wrapper (`SacpClient`), and arm the heartbeat-loss watchdog immediately when `startHeartbeat()` is invoked rather than in the first callback.
 - **Upstream-relevant:** yes
 
+### Verification
+- **Verdict:** confirmed (mechanism); unknowable-statically (loss frequency over TCP)
+- **Checked:** `Communication.send` (re-read :77-119): `isRTO` defaults `false` (:80); the retry/timeout `setTimeout(...2000)` is set ONLY inside `if (isRTO)` (:95-108); the `else`/non-RTO path stores the handler in `requestHandlerMap` and writes the buffer with no timer (:84-93) → promise never settles if no ACK. `reolvePacketBuffer` (:197-224) processes a packet only when `validateChecksum` passes (:198), and unconditionally clears `receiveBuffer` (:223) — a checksum-failed packet is dropped silently and its handler stays in `requestHandlerMap`. `Dispatcher.subscribe` (:202-225) → `this.send(0x01,0x00,...)` (:218) → `communication.send(..., toBuffer())` (Dispatcher.js:168) with only 2 args → `needReply=true, isRTO=false`. `SacpClient.executeGcode` (:179-183) → `send(0x01,0x02,...)` likewise non-RTO. `SacpChannel.startHeartbeat` (:165-208) arms `this.heartbeatTimer` only inside `subscribeHeartbeatCallback` (:169-180), so a hung `subscribeHeartbeat` (:205) means the watchdog is never armed.
+- **Notes:** Mechanism confirmed on every leg. One refinement: coordinate moves are NOT non-RTO — `requestAbsoluteCooridateMove` passes `isRTO=true` (`SacpClient.ts:687`), so jogs/origin moves get the 2 s retry/synthetic-resolve. The finding's wording "most commands are non-RTO" plus its specific `executeGcode`/subscription examples remains accurate (both verified non-RTO). The frequency of lost/corrupted ACKs over a local TCP link is not statically determinable (auditor already rates frequency medium). Severity P1 appropriate.
+
 ## F12: Any new client socket connection terminates the HTTP heartbeat of the active machine connection, and channel events keep flowing to a dead socket after socket.io reconnect
 
 - **Location:** `src/server/services/index.ts:52` (`socketServer.on('connection', connectionManager.onConnection)`); `src/server/services/machine/ConnectionManager.ts:133-136`; `src/server/services/machine/channels/SstpHttpChannel.ts:148-150`; `src/server/services/machine/Channel` socket binding only at `ConnectionManager.ts:350`
@@ -154,6 +194,11 @@ Workflow status semantics also differ: HTTP lowercases the screen's status strin
 - **Evidence:** `public onConnection = () => { this.stopHeartBeat(); };` (SstpHttpChannel.ts:148-150) — no guard for "heartbeat belongs to an active connection"; `this.channel.setSocket(socket)` appears only in `connectionOpen` (ConnectionManager.ts:350); no `setSocket` call in `onConnection` (ConnectionManager.ts:133-136).
 - **Proposed fix:** Remove the unconditional `stopHeartBeat()` from `onConnection` (only stop when the same client re-opens a connection), and rebind `channel.setSocket(socket)` (or emit through the socket pool/broadcast) in `connectionManager.onConnection` when a machine connection is active.
 - **Upstream-relevant:** yes
+
+### Verification
+- **Verdict:** confirmed (mechanism); unknowable-statically (real-world reconnect/multi-window frequency)
+- **Checked:** `services/index.ts:52` `socketServer.on('connection', connectionManager.onConnection)` — fires on every new socket.io client connection. `ConnectionManager.onConnection` (:133-136) calls `sstpHttpChannel.onConnection()` with no guard. `SstpHttpChannel.onConnection` (:148-150) calls `this.stopHeartBeat()`; `stopHeartBeat` (:382-384) does `this.heartBeatWorker.terminate(); this.heartBeatWorker = null;` — kills the active machine's poll worker. `channel.setSocket(socket)` appears only in `connectionOpen` (`ConnectionManager.ts:350`); no `setSocket` in `onConnection` (:133-136). `SocketManager.onConnection` pushes each new socket (lib/SocketManager/index.ts:84) and splices on disconnect (:105) — a reconnect is a new `Socket` instance, so the channel's bound `this.socket` becomes stale.
+- **Notes:** Both coupled defects confirmed exactly as described. Note `onDisconnection` is wired (`services/index.ts:53`) but does not rebind/clear `channel.socket` either. Frequency depends on multi-window use or socket.io reconnects (auditor flags this; open question #5). Severity P0 appropriate for the mechanism.
 
 ## F13: `laserIsLocked` and SACP `laserFocalLength` are one-shot at connect; the focal-length emit also stomps live position/temperature with zeros
 

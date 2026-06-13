@@ -49,6 +49,11 @@ Key architectural facts established first (referenced by findings):
 - **Proposed fix:** In `connectionOpen`, `await this.channel.connectionClose({ force: true })` before dropping the reference (and clear `this.machineInstance` via `onClosed()` as `connectionClose` does).
 - **Upstream-relevant:** yes
 
+### Verification
+- **Verdict:** confirmed
+- **Checked:** `ConnectionManager.connectionOpen` (`ConnectionManager.ts:290-355`): lines 291-295 only `unbindChannelEvents()` + `this.channel = null` — no `connectionClose()` call, and `this.machineInstance` is NOT touched here (only nulled later in `connectionClose`, `:405-411`). `SstpHttpChannel.connectionOpen` (`:264-269`) re-installs the two 1 s `setInterval`s into `intervalRefMap`; the only clears are in `connectionClose` (`clearAllInterval()` at `:286`) and the offline callback (`:325`). Traced `bindChannelEvents`/`unbindChannelEvents` (`:265-285`) — they only attach/detach manager listeners, they do not stop the channel.
+- **Notes:** Confirmed as written. Additional nuance worth noting: because all channels are singletons, an HTTP→HTTP re-open does call `clearInterval(...)` before re-`setInterval` (`:264-269`), so the leak is specifically the *cross-channel* switch (HTTP→SACP, or HTTP machine A→machine B where the abandoned channel is HTTP) and the renderer-reload re-open path. Also note the abandoned `machineInstance` survives entirely (its `onClosed()` never runs), reinforcing the leak. Severity P1 appropriate. Mechanism overlaps F5/F9 (abandoned-channel / stale-socket family) but F1 is distinct (it is the *switch* path, not the death-notification path).
+
 ## F2: Failed protocol detection replies on a stale/null socket — requesting client hangs forever
 
 - **Location:** `src/server/services/machine/ConnectionManager.ts:334-342` (related: `src/app/flux/workspace/MachineAgent.ts:109`)
@@ -70,6 +75,11 @@ Key architectural facts established first (referenced by findings):
 - **Proposed fix:** Emit the 404 on the `socket` parameter (or assign `this.socket = socket` at the top of `connectionOpen`).
 - **Upstream-relevant:** yes
 
+### Verification
+- **Verdict:** confirmed
+- **Checked:** `ConnectionManager.ts:334-342`: the `NetworkProtocol.Unknown` early-return uses `this.socket && this.socket.emit(...)` and returns BEFORE `this.socket = socket` at line 342. Confirmed `this.socket` is initialized to `null` (`:112`) and the only assignment is `:342` (grep of file shows no earlier write). Client side: `MachineAgent.ts:97-126` does `.once(SocketEvent.ConnectionOpen, ...)` and resolves only on receipt; if the 404 is emitted on a stale/null socket it never resolves.
+- **Notes:** Confirmed. The "Unknown protocol" path is reachable in practice because detection runs on every Wi-Fi connect (header note / F7), so a transient probe failure that returns `Unknown` triggers exactly this. On first-ever connect `this.socket` is null → emit is a no-op → client hangs. On later connects it emits to the previous session's socket (could be a different/closed renderer). Severity P1 appropriate.
+
 ## F3: SacpTcpChannel.connectionOpen never settles on connect failure, and stacks `connect` listeners on the singleton net.Socket
 
 - **Location:** `src/server/services/machine/channels/SacpTcpChannel.ts:62-69` and `:49-51` (related: `:34`, `:72`, `ConnectionManager.ts:353`)
@@ -90,6 +100,11 @@ Key architectural facts established first (referenced by findings):
   ```
 - **Proposed fix:** Register a per-attempt `once('error', reject)` (and a connect timeout) and remove the stale `connect` listener on failure; or create a fresh `net.Socket` per `connectionOpen`.
 - **Upstream-relevant:** yes
+
+### Verification
+- **Verdict:** confirmed
+- **Checked:** `SacpTcpChannel.ts`: `this.client = new net.Socket()` once in constructor (`:34`); constructor `'error'` handler only `log.error` (`:49-51`), never rejects. `connectionOpen` (`:62-188`) returns a Promise whose `resolve`/`reject` are reachable only from inside the `client.connect(..., cb)` success callback (`:66-186`) — the only `reject` is in the inner `catch` (`:181-184`) which is itself inside the success callback, so a failed TCP connect (the `cb` never fires) leaves the promise pending. `ConnectionManager.ts:353` does `await this.channel.connectionOpen(options)` with no timeout. The `connect(options, cb)` form registers `cb` as a one-time `'connect'` listener per Node semantics; on failure it is not removed.
+- **Notes:** Confirmed (hang: high; listener-stacking: the mechanism is real but its observable effect depends on a later *successful* connect on the same singleton socket after prior failures — plausible but second-order, matching the auditor's own "medium" confidence). One caveat on the stacking claim: a failed `net.Socket.connect()` typically emits `'error'` and the socket may need explicit re-use handling; whether N callbacks truly all fire on a later success is Node-version-dependent (the audit's Open Question #2 already flags this). Severity P1 appropriate for the hang alone.
 
 ## F4: Heartbeat watchdog is armed only after the first beat and never disarmed on disconnect — stale timer can kill the next session
 
@@ -116,6 +131,11 @@ Key architectural facts established first (referenced by findings):
 - **Proposed fix:** Arm the watchdog immediately after `subscribeHeartbeat` resolves; clear `heartbeatTimer` in every `connectionClose` path (and call `stopHeartbeat()` from `MachineInstance.onClosing`).
 - **Upstream-relevant:** yes
 
+### Verification
+- **Verdict:** partially-confirmed
+- **Checked:** `SacpChannel.ts:165-208` (modern `startHeartbeat`): the watchdog `setTimeout` is created inside `subscribeHeartbeatCallback` (`:174-180`), so (a) holds — no timer until the first beat arrives. `stopHeartbeat()` (`:210-226`) clears `this.heartbeatTimer`. `SM2Instance.ts:6-13`: `onPrepare` calls `this.channel.startHeartbeat()`; it does NOT override `onClosing`/`onClosed` (base `Instance.ts:39-48` are empty). `SacpTcpChannel.connectionClose` (`:190-240`) contains no `clearTimeout(this.heartbeatTimer)` and no `stopHeartbeat()` call. `ConnectionManager.connectionClose` (`:360-413`) calls `machineInstance.onClosing()` (`:377`) which for SM2 is the empty base method — so `stopHeartbeat` is never reached for SM2.
+- **Notes:** Claim (b) is confirmed for SM2 over **UDP** (where SM2 does reach Ready → `startHeartbeat`). Important correction interacting with F8: SM2 over **TCP never reaches `ChannelEvent.Ready`** (F8), so `startHeartbeat` is never called there and no modern watchdog is ever armed on the TCP channel — the stale-watchdog-kills-next-session scenario for SM2 is therefore realized on the **UDP singleton channel**, not the TCP one. Contrast: Artisan/J1/Ray DO override `onClosing` and call `stopHeartbeat(this.id)` (`ArtisanInstance.ts:113`, `J1Instance.ts:114`, `RayInstance.ts:148`) — but they use `startHeartbeatLegacy` whose watchdog is `heartbeatTimerLegacy[id]` (`:861`), and `stopHeartbeat(id)` clears that. So the "never disarmed" gap is specific to the SM2 modern-heartbeat path. Mechanism (b) is real; recommend keeping P1 but scoping the description to the SM2/UDP modern-heartbeat path. (a) confirmed for all modern-heartbeat users.
+
 ## F5: Channel-initiated death never reaches ConnectionManager — manager keeps a dead channel as "current"
 
 - **Location:** `src/server/services/machine/channels/SacpChannel.ts:174-180`; `channels/ChannelEvent.ts` (`Disconnected` never emitted); `ConnectionManager.ts:360-413`
@@ -126,6 +146,11 @@ Key architectural facts established first (referenced by findings):
 - **Evidence:** `ChannelEvent.Disconnected` exists in `ChannelEvent.ts` but `grep -rn "ChannelEvent.Disconnected" src/` returns only the declaration. The watchdog path emits directly: `this.socket.emit('connection:close')` (`SacpChannel.ts:179`) — manager state untouched (no code path mutates `connectionManager.channel` other than `connectionOpen`/`connectionClose`, `ConnectionManager.ts:290-413`).
 - **Proposed fix:** Emit `ChannelEvent.Disconnected` from all channel death paths; have `ConnectionManager` subscribe to it in `bindChannelEvents` and run the same teardown as `connectionClose` (null channel, `machineInstance.onClosed()`, emit a well-formed `connection:close`).
 - **Upstream-relevant:** yes
+
+### Verification
+- **Verdict:** confirmed
+- **Checked:** `grep -rn ChannelEvent.Disconnected src/` → only the declaration in `ChannelEvent.ts:19`; never emitted. Death paths confirmed: modern watchdog `SacpChannel.ts:179` emits bare `this.socket.emit('connection:close')` (no payload), vs every other emit of that event carries a `{code,data,msg,text}` result object (`SacpTcpChannel.ts:41-47,86-92`, `SstpHttpChannel.ts:325`, `ConnectionManager.ts:384-401`). `bindChannelEvents` (`ConnectionManager.ts:265-274`) subscribes only to Connecting/Connected/Ready/ErrorReport — not Disconnected. Confirmed `this.channel`/`this.protocol`/`this.machineInstance` are mutated only inside `connectionOpen`/`connectionClose` (no other writers in the file). Command handlers (e.g. `executeGcode` `:424`, `goHome` `:1295`) dereference `this.channel` unconditionally.
+- **Notes:** Confirmed. The legacy watchdog path (`SacpChannel.ts:864`) also emits bare `connection:close`. The TCP `'close'` handler (`SacpTcpChannel.ts:39-47`) and HTTP offline callback (`SstpHttpChannel.ts:322-327`) do emit a payload but still never notify the manager. So in all death paths the manager keeps stale state. Severity P1 appropriate.
 
 ## F6: Any new client socket connection silently kills the active HTTP heartbeat worker
 
@@ -149,6 +174,11 @@ Key architectural facts established first (referenced by findings):
 - **Proposed fix:** Remove the `stopHeartBeat()` call from `onConnection` (or only stop it when the connecting socket is about to take over the channel, i.e. inside `connectionOpen`). At minimum, emit `connection:close` so the UI knows polling stopped.
 - **Upstream-relevant:** yes
 
+### Verification
+- **Verdict:** confirmed
+- **Checked:** Full wiring traced. `services/index.ts:52`: `socketServer.on('connection', connectionManager.onConnection)`. `SocketManager.onConnection` (`SocketManager/index.ts:78-108`) runs for EVERY socket.io client connect and calls `this.emit('connection', socket)` at `:88` — so `connectionManager.onConnection` fires PER SOCKET, not once. `ConnectionManager.onConnection` (`:133-136`) unconditionally calls `sstpHttpChannel.onConnection()` → `this.stopHeartBeat()` (`SstpHttpChannel.ts:148-150`), which does `heartBeatWorker.terminate(); heartBeatWorker = null` (`:382-385`). No code restarts it on a stray connect, and no `connection:close` is emitted on this path. `pingTimeout: 180000` confirmed (`SocketManager/index.ts:36`).
+- **Notes:** Confirmed exactly as written, including the per-socket firing (the load-bearing claim). The HTTP heartbeat worker is the SOLE status poller for the HTTP channel (the 1 s `getEnclosureStatus`/`getModuleInfo` intervals are separate and survive, but they emit `Marlin:settings`/`machine:module-info`, NOT `Marlin:state` — so position/origin/workflow status freeze as claimed). `startHeartbeat` is not a registered socket event (`machine-handlers.ts` has no entry; grep confirms), so nothing re-arms it. P0 severity strongly justified given the origin-crash path. This is the most impactful confirmed finding in this file.
+
 ## F7: Protocol detection runs on every connect, mutates the live UDP singleton, and can flap between channels
 
 - **Location:** `src/server/services/machine/ProtocolDetector.ts:84-120`; `src/server/services/machine/channels/SacpUdpChannel.ts:46-62`; `ConnectionManager.ts:302-309`
@@ -166,6 +196,11 @@ Key architectural facts established first (referenced by findings):
   ```
 - **Proposed fix:** Use a throwaway `SacpClient`/socket inside `test()`; skip detection when the channel for `host` is already connected; map the discovery string `'SACP'` to a concrete protocol on the server so detection only runs when genuinely unknown.
 - **Upstream-relevant:** yes
+
+### Verification
+- **Verdict:** confirmed
+- **Checked:** "Always runs": confirmed via `BroadcastMachineFinder.ts:53-54` (`device.protocol = 'SACP'`), propagated client-side through `actions-discover.ts:50-53` → `MachineAgent.createAgent` (`MachineAgent.ts:55` default `''`) → emitted as `protocol` (`MachineAgent.ts:106`). `ConnectionManager.ts:304` checks `includes([SacpOverTCP='SACP-TCP', SacpOverUDP='SACP-UDP', HTTP='HTTP'], protocol)` (enum values from `ProtocolDetector.ts:13-18`) — `'SACP'`/`''` never match, so `inspectNetworkProtocol` runs every Wi-Fi connect. (1) `SacpUdpChannel.test()` (`:46-62`) does `this.sacpClient = new SacpClient('udp', {socket: this.socketClient, host, port})` — overwrites the live singleton `sacpClient`; the shared `socketClient.on('message')` (`:25-29`) routes datagrams to whatever `this.sacpClient` currently is. (2) `detectNetworkProtocol` (`:104-120`) uses `Promise.allSettled` with priority TCP>UDP>HTTP; TCP/HTTP probes are 1 s `net` connects (`:35,32`), UDP test is a 2 s race (`:59-61`).
+- **Notes:** Confirmed. Correction to a sub-detail: the audit text says "independent 1-2 s probe timeouts" — the three probes actually run concurrently via `allSettled` (not sequentially), so total detection latency is ~max(2s), and a downgrade to HTTP happens when both SACP probes fail/lose their race within that window. The core harm (live UDP singleton `sacpClient` overwrite mid-session deafening all subscriptions) is real and correctly described. Severity P1 appropriate; flap-frequency "medium" confidence is fair. Mechanism (1) is the same singleton-overwrite family as F1/F5.
 
 ## F8: SM2 over SACP gets no (or crippled) machine instance — "Connected" with no state subscriptions
 
@@ -188,6 +223,11 @@ Key architectural facts established first (referenced by findings):
 - **Proposed fix:** Emit `Ready` with the decoded `machineIdentifier` unconditionally in `SacpTcpChannel` (manager already switches on identifier); give `SM2Instance.onPrepare` the same subscription set as the legacy path (coordinates at minimum).
 - **Upstream-relevant:** yes
 
+### Verification
+- **Verdict:** confirmed
+- **Checked:** `SacpTcpChannel.connectionOpen` (`:108-117`): emits `ChannelEvent.Ready` only inside `if (machineIdentifier === SnapmakerArtisanMachine.identifier)` and `if (... === SnapmakerJ1Machine.identifier)` — no SM2/A150/A250/A350 branch, no Ray branch, no default. `onChannelReady` (`ConnectionManager.ts:205-251`) is the only `SM2Instance` constructor site and it runs only on `ChannelEvent.Ready`. So SM2 over TCP: `Connected` is emitted (`:97`) but `Ready` is not → no `SM2Instance` → no `startHeartbeat`. Confirmed `connection:startHeartbeat`/`startHeartbeat` is not a registered socket event (`machine-handlers.ts`, grep). UDP path: `SacpUdpChannel.connectionOpen` (`:86-88`) emits `Ready` unconditionally. Modern `startHeartbeat` (`SacpChannel.ts:165-208`) subscribes only heartbeat (`:205`) + purifier (`:206`) — no coordinate/hotbed/nozzle/CNC/laser subscriptions, unlike `startHeartbeatLegacy` (`:954-1077`).
+- **Notes:** Confirmed from code. The "which port SM2 firmware exposes" caveat (audit Open Question #1) is the only thing that gates whether the TCP branch is hit in the field — correctly flagged as medium confidence. Note this finding directly governs F4(b): the never-disarmed modern watchdog only matters for SM2 if SM2 reaches `startHeartbeat`, which over TCP it does not. P1 appropriate.
+
 ## F9: Renderer reload / second tab: server keeps the machine link bound to a dead socket; new client gets no snapshot
 
 - **Location:** `src/server/services/machine/ConnectionManager.ts:139-144` (related: `ConnectionManager.ts:350`, `SstpHttpChannel.ts:152-154`, `SacpTcpChannel.ts:58-60`, `lib/SocketManager/index.ts:100-107`)
@@ -206,6 +246,11 @@ Key architectural facts established first (referenced by findings):
   ```
 - **Proposed fix:** On client disconnect, either force-close the machine channel after a grace period, or keep it and implement a re-attach path: rebind `channel.setSocket(newSocket)` and emit a full state snapshot (`connection:connected` + Marlin:state) when a client re-opens against an already-connected channel.
 - **Upstream-relevant:** yes
+
+### Verification
+- **Verdict:** confirmed
+- **Checked:** `ConnectionManager.onDisconnection` (`:139-144`): calls only `sstpHttpChannel.onDisconnection()` (empty body, `SstpHttpChannel.ts:152-154`), `textSerialChannel.onDisconnection(socket)`, and `scheduledTasksHandle.cancelTasks()`. No SACP channel touched, `this.channel`/`this.socket` not reset. The only `this.channel.setSocket(socket)` rebind is in `connectionOpen` (`:350`). `SacpTcpChannel.onDisconnection` (`:58-60`) is empty. `SocketManager` disconnect path (`:100-107`) emits `'disconnection'` and splices the socket — no channel adoption logic exists. No `connection:connected` snapshot is pushed on a fresh client socket; the HTTP path only re-emits `connection:connected` after a full re-`connectionOpen` + first heartbeat (`SstpHttpChannel.ts:360-367`).
+- **Notes:** Confirmed. The collision with F1/F3/F4 on the recovery re-`connectionOpen` is accurate (re-open reuses the singleton TCP `net.Socket` per F3, abandons the prior channel per F1, and the stale modern watchdog per F4 may still be live). Severity P1 appropriate. Stale-socket emission is the same family as F1/F5/F6 but F9 is the distinct client-disconnect/re-attach gap.
 
 ## F10: connectionClose reports success unconditionally and drops the channel even when close failed
 

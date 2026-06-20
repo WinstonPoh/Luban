@@ -1318,11 +1318,13 @@ M3`;
             }
 
             // Fast homing (opt-in, "workspace clear"): temporarily raise the firmware homing feedrate
-            // via M1028 S1 (values are mm/s; defaults XY 50 / Z 10 / B 30). The slow endstop "bump"
-            // is unaffected, so endstop accuracy is preserved. Restored to defaults after G28. The
+            // via M1028 S1 (mm/s; stock homing speeds are XY 50 / Z 10). We set the per-axis MAX
+            // feedrates (DEFAULT_MAX_FEEDRATE = X120 Y120 Z40 in firmware); the planner clamps to these
+            // anyway, so higher values have no effect and these are inherently safe. The slow endstop
+            // "bump" is unaffected, so accuracy is preserved. Restored to defaults after G28; the
             // controller queues these in order, so the raise applies to G28 and the restore runs after.
             if (fastHome) {
-                await this.executeGcode(socket, { gcode: 'M1028 S1 X80 Y80 Z25' });
+                await this.executeGcode(socket, { gcode: 'M1028 S1 X120 Y120 Z40' });
             }
 
             await this.executeGcode(socket, { gcode: 'G53' });

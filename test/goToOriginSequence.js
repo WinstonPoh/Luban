@@ -11,5 +11,11 @@ test('sequenceGoToOrigin orders Z safely', (t) => {
     t.deepEqual(sequenceGoToOrigin({ z: 0 }, 800),
         ['G0 Z0 F800', 'G0 X0 Y0 B0 F800'],
         'at origin: Z first (no diagonal), honors feed');
+    t.deepEqual(sequenceGoToOrigin({ z: 5 }, 1500, true),
+        ['G0 X0 Y0 B0 Z0 F1500'],
+        'diagonal mode: single move, all axes at once');
+    t.deepEqual(sequenceGoToOrigin({ z: -2 }, 1500, true),
+        ['G0 X0 Y0 B0 Z0 F1500'],
+        'diagonal mode ignores current Z (single combined move)');
     t.end();
 });

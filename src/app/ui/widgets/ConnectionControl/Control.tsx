@@ -257,11 +257,13 @@ const Control: React.FC<ConnectionControlProps> = ({ widgetId, isNotInWorkspace,
         // Go To Work Origin as two SEQUENCED moves so the head never travels diagonally into the
         // bed (audit R6 / 02-F2). Above the origin: XY first then descend Z; at/below: raise Z first.
         // Sent as one atomic multi-line executeGcode so the HTTP channel runs them strictly in order.
-        goToWorkOrigin: () => {
+        goToWorkOrigin: (diagonal = false) => {
             const parsedZ = parseFloat(state.workPosition?.z);
             const currentZ = Number.isFinite(parsedZ) ? parsedZ : 0;
             const doMove = () => {
-                const lines = sequenceGoToOrigin({ z: currentZ }, state.jogSpeed);
+                // diagonal=true sends a single all-axis G0 (hypotenuse) for speed when the workspace
+                // is clear; otherwise Z is sequenced separately to avoid a diagonal bed plunge (R6).
+                const lines = sequenceGoToOrigin({ z: currentZ }, state.jogSpeed, diagonal);
                 actions.executeGcode(lines.join('\n'));
             };
             // The saved work origin survives homing / material / toolhead changes (audit R10 / 02-F4).

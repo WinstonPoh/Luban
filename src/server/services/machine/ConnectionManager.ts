@@ -1304,8 +1304,9 @@ M3`;
     //
 
     public goHome = async (socket, options, callback) => {
-        const { headType } = options;
+        const { headType, fastHome } = options;
         if (includes([NetworkProtocol.SacpOverTCP, SerialPortProtocol.SacpOverSerialPort, NetworkProtocol.SacpOverUDP], this.protocol)) {
+            // TODO(fast-home/SACP): SACP homing would need the M1028 feedrate bump applied here too.
             this.channel.goHome(headType);
             socket && socket.emit('move:status', { isHoming: true });
         } else {
@@ -1315,8 +1316,21 @@ M3`;
             if (this.connectionType === ConnectionType.WiFi) {
                 socket && socket.emit('move:status', { isHoming: true });
             }
+
+            // Fast homing (opt-in, "workspace clear"): temporarily raise the firmware homing feedrate
+            // via M1028 S1 (values are mm/s; defaults XY 50 / Z 10 / B 30). The slow endstop "bump"
+            // is unaffected, so endstop accuracy is preserved. Restored to defaults after G28. The
+            // controller queues these in order, so the raise applies to G28 and the restore runs after.
+            if (fastHome) {
+                await this.executeGcode(socket, { gcode: 'M1028 S1 X80 Y80 Z25' });
+            }
+
             await this.executeGcode(socket, { gcode: 'G53' });
             await this.executeGcode(socket, { gcode: 'G28' });
+
+            if (fastHome) {
+                await this.executeGcode(socket, { gcode: 'M1028 S1 X50 Y50 Z10' });
+            }
 
             // Always restore the work coordinate system after homing — not just for laser/CNC. Leaving
             // the machine in modal G53 (machine space) makes the next absolute move plunge to machine

@@ -95,6 +95,8 @@ const ControlPanel: React.FC<ControlPanelProps> = (props) => {
 
     const [isConnectedRay, setIsConnectedRay] = useState(false);
     const [keepLaserOn, setKeepLaserOn] = useState(false);
+    // Opt-in fast homing: raises the firmware homing feedrate via M1028 for this home only.
+    const [fastHome, setFastHome] = useState(false);
 
     const onToggleKeepLaser = useCallback(() => {
         setKeepLaserOn(!keepLaserOn);
@@ -109,9 +111,9 @@ const ControlPanel: React.FC<ControlPanelProps> = (props) => {
             setTimeout(() => { dispatch(workspaceActions.updateState({ isMoving: false })); }, 2000);
             return dispatch(workspaceActions.executeGcode('$H')) as unknown as Promise<void>;
         } else {
-            return dispatch(workspaceActions.executeGcodeAutoHome(true));
+            return dispatch(workspaceActions.executeGcodeAutoHome(true, fastHome));
         }
-    }, [dispatch, workspaceActions, isConnectedRay]);
+    }, [dispatch, workspaceActions, isConnectedRay, fastHome]);
 
     useEffect(() => {
         if (!activeMachine) return;
@@ -308,6 +310,19 @@ const ControlPanel: React.FC<ControlPanelProps> = (props) => {
                         >
                             {i18n._('key-Workspace/Console-Home')}
                         </Button>
+                    )
+                }
+                {
+                    (!isNotInWorkspace && !isConnectedRay) && (
+                        <div className="sm-flex justify-space-between align-center margin-top-8">
+                            <span className="max-width-208 text-overflow-ellipsis">{i18n._('Fast homing (workspace clear)')}</span>
+                            <Switch
+                                className="sm-flex-auto"
+                                onClick={() => setFastHome(!fastHome)}
+                                checked={fastHome}
+                                disabled={disabled}
+                            />
+                        </div>
                     )
                 }
                 <div className="sm-flex justify-space-between align-center">

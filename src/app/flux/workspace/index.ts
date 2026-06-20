@@ -974,7 +974,7 @@ export const actions = {
         );
     },
 
-    executeGcodeAutoHome: (hasHomingModel = false) => (dispatch, getState) => {
+    executeGcodeAutoHome: (hasHomingModel = false, fastHome = false) => (dispatch, getState) => {
         const { homingModal, isConnected } = getState().workspace;
         const machineAgent: MachineAgent = getState().workspace.server;
         const { headType } = getState().workspace;
@@ -988,7 +988,7 @@ export const actions = {
             }
             return;
         }
-        machineAgent.goHome({ hasHomingModel, headType }, () => {
+        machineAgent.goHome({ hasHomingModel, headType, fastHome }, () => {
             dispatch(
                 baseActions.updateState({
                     homingModal: false

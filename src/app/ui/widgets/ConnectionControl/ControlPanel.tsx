@@ -14,6 +14,7 @@ import JogDistance from './JogDistance';
 import JogPad from './JogPad';
 import MotionButtonGroup from './MotionButtonGroup';
 import ABPositionButtonGroup from './ABPositionButtonGroup';
+import { showConfirmWithCheckbox } from './components/ConfirmWithCheckbox';
 import styles from './styles.styl';
 import { SnapmakerRayMachine } from '../../../machines';
 import { L2WLaserToolModule } from '../../../machines/snapmaker-2-toolheads';
@@ -95,8 +96,6 @@ const ControlPanel: React.FC<ControlPanelProps> = (props) => {
 
     const [isConnectedRay, setIsConnectedRay] = useState(false);
     const [keepLaserOn, setKeepLaserOn] = useState(false);
-    // Opt-in fast homing: raises the firmware homing feedrate via M1028 for this home only.
-    const [fastHome, setFastHome] = useState(false);
 
     const onToggleKeepLaser = useCallback(() => {
         setKeepLaserOn(!keepLaserOn);
@@ -107,13 +106,19 @@ const ControlPanel: React.FC<ControlPanelProps> = (props) => {
     const goHome = useCallback(() => {
         if (isConnectedRay) {
             dispatch(workspaceActions.updateState({ isMoving: true }));
-
             setTimeout(() => { dispatch(workspaceActions.updateState({ isMoving: false })); }, 2000);
-            return dispatch(workspaceActions.executeGcode('$H')) as unknown as Promise<void>;
-        } else {
-            return dispatch(workspaceActions.executeGcodeAutoHome(true, fastHome));
+            dispatch(workspaceActions.executeGcode('$H'));
+            return;
         }
-    }, [dispatch, workspaceActions, isConnectedRay, fastHome]);
+        // Confirm before homing; the "fast homing" option lives inside the modal.
+        showConfirmWithCheckbox({
+            title: i18n._('key-Workspace/Console-Home'),
+            message: i18n._('Home the machine? With fast homing on, make sure the workspace is clear.'),
+            checkboxLabel: i18n._('Fast homing (workspace clear)'),
+            defaultChecked: false,
+            onConfirm: (fast) => dispatch(workspaceActions.executeGcodeAutoHome(true, fast)),
+        });
+    }, [dispatch, workspaceActions, isConnectedRay]);
 
     useEffect(() => {
         if (!activeMachine) return;
@@ -310,19 +315,6 @@ const ControlPanel: React.FC<ControlPanelProps> = (props) => {
                         >
                             {i18n._('key-Workspace/Console-Home')}
                         </Button>
-                    )
-                }
-                {
-                    (!isNotInWorkspace && !isConnectedRay) && (
-                        <div className="sm-flex justify-space-between align-center margin-top-8">
-                            <span className="max-width-208 text-overflow-ellipsis">{i18n._('Fast homing (workspace clear)')}</span>
-                            <Switch
-                                className="sm-flex-auto"
-                                onClick={() => setFastHome(!fastHome)}
-                                checked={fastHome}
-                                disabled={disabled}
-                            />
-                        </div>
                     )
                 }
                 <div className="sm-flex justify-space-between align-center">
